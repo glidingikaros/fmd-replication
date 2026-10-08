@@ -105,6 +105,17 @@ def firmware(qemu: Path) -> tuple[Path, Path]:
     raise SystemExit("no x86_64 UEFI firmware found next to QEMU or in /usr/share/OVMF")
 
 
+def iso_digest(path: Path, sha256: str | None) -> None:
+    """Hash an ISO already on disk (fmd replicate setup --iso) and check it against its pin."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(8 << 20):
+            digest.update(chunk)
+    log(f"iso: {path}, {path.stat().st_size} bytes, sha256 {digest.hexdigest()}")
+    if sha256 and digest.hexdigest() != sha256.lower():
+        raise SystemExit(f"the ISO's sha256 is not the pinned {sha256.lower()}")
+
+
 def download(url: str, target: Path, sha256: str | None) -> None:
     started = time.monotonic()
     digest = hashlib.sha256()
@@ -399,7 +410,7 @@ def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iso-url", required=True)
+    parser.add_argument("--iso-url", required=True, help="a link to the ISO, or the ISO file itself")
     parser.add_argument("--iso-sha256", help="the ISO's published SHA-256, checked after the download")
     parser.add_argument("--edition", choices=("eval", "pro"), default="eval")
     parser.add_argument("--work", type=Path, default=Path("win-work"))
@@ -416,7 +427,13 @@ def main() -> int:
     log(f"host {platform.system()} {platform.machine()} {platform.processor()}, accelerator {accelerator}, cpu {cpu}")
     log(subprocess.run([str(qemu), "--version"], capture_output=True, text=True).stdout.splitlines()[0])
 
-    download(args.iso_url, work / "win.iso", args.iso_sha256)
+    iso = Path(args.iso_url)
+    if iso.is_file():
+        iso = iso.resolve()
+        iso_digest(iso, args.iso_sha256)
+    else:
+        iso = work / "win.iso"
+        download(args.iso_url, iso, args.iso_sha256)
     answer_iso(work / "answer.iso", args.edition)
     shutil.copyfile(code, work / "code.fd")
     shutil.copyfile(variables, work / "vars.fd")
@@ -436,7 +453,7 @@ def main() -> int:
             "-drive", "if=pflash,format=raw,file=vars.fd",
             "-drive", "id=disk,if=none,format=qcow2,file=win.qcow2,cache=unsafe",
             "-device", "ide-hd,drive=disk,bus=ide.0,bootindex=0",
-            "-drive", "id=winiso,if=none,media=cdrom,readonly=on,file=win.iso",
+            "-drive", f"id=winiso,if=none,media=cdrom,readonly=on,file={str(iso).replace(',', ',,')}",
             "-device", "ide-cd,drive=winiso,bus=ide.1,bootindex=1",
             "-drive", "id=answer,if=none,media=cdrom,readonly=on,file=answer.iso",
             "-device", "ide-cd,drive=answer,bus=ide.2",
@@ -499,7 +516,8 @@ def main() -> int:
             vm.kill()
             vm.wait()
 
-    (work / "win.iso").unlink()
+    if iso == work / "win.iso":  # downloaded here; a file the user gave stays
+        iso.unlink()
     verify(qemu, accelerator, cpu, work)
     started = time.monotonic()
     subprocess.run([qemu_tool(qemu, "qemu-img"), "convert", "-c", "-O", "qcow2", "-o", "compression_type=zstd",

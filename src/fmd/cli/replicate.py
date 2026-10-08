@@ -14,6 +14,8 @@ def add_replicate_parser(subcommands) -> None:
     setup = actions.add_parser("setup", allow_abbrev=False,
                                help="Install the pinned .NET runtime, Ansible and collection tools; build the Windows base.")
     setup.add_argument("--skip-base", action="store_true", help="Prepare the tools only.")
+    setup.add_argument("--iso", type=Path,
+                       help="Microsoft's Windows 11 x64 ISO, which Linux and Windows hosts build the base from.")
     run = actions.add_parser("run", allow_abbrev=False, help="Generate, collect and analyse paper images.")
     run.add_argument("images", nargs="*", choices=["I1", "I2", "I3"], help="default: I1 I2 I3")
     run.add_argument("--output", type=Path, default=Path("replication"))
@@ -31,6 +33,6 @@ def run_replicate(args: argparse.Namespace) -> int:
             print(f"{'ok ' if ok else 'NO '} {name:<{width}}  {detail}")
         return 0 if all(ok for _, ok, _ in rows) else 1
     if args.replicate_action == "setup":
-        setup.all_steps(build_base=not args.skip_base)
+        setup.all_steps(build_base=not args.skip_base, iso=args.iso)
         return 0
     return run.images(list(args.images) or ["I1", "I2", "I3"], args.output, args.attempts)

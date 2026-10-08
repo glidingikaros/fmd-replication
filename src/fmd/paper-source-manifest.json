@@ -30,7 +30,7 @@
     "package/cli/output.py": "b9b785bd09f035474260349af0636d369aa484df04905db29976b5a5bbc41265",
     "package/cli/paper.py": "3065b23d360cf128198aa22b68946eccb9ff2c461a410d898c5e9f62820454f2",
     "package/cli/pipeline.py": "d04b6ae2fbc53b69500a495e692c27d9dd7a161ff30bf6d13ad2ac37bab5bca4",
-    "package/cli/replicate.py": "7454847f18b40feb9524898532f088d5453d23626754e088a2cb86573eb5e9ad",
+    "package/cli/replicate.py": "8fcc3c2c0ad428a2d39362f77e8512dd89c4cae02fd55c8054467ada0649a968",
     "package/collection/alignment.py": "8d61c7fcb70b19a77ee85d70fb178fc237ac4d399cd8d2ece653924462bf1ada",
     "package/collection/analysis.py": "73f732e2addd102aa5a46dbe69f447b7a733d7710bb908c524f1fb3fe7209200",
     "package/collection/factual_challenge.py": "a9924b7a683e710a289da9a9fd5c7cc858a87fc35b513fc76fe7c980cd2be9e4",
@@ -264,10 +264,10 @@
     "package/profiles.py": "cf831b6210c2945e61c033af0738626126c65153e5cb641256f7ab4d79654e6b",
     "package/question_packs.py": "78c86fc66da7caadf891e1482cb6b87c4422d2b507c98f7b02b250b133f064ce",
     "package/replication/__init__.py": "189ae104eda888414f3eec9bb18cee04acc63d87d57e00c9da19b0b815ee1f03",
-    "package/replication/host.py": "1ff5b961532f6cc2e5178125cec4ccd2148ec67fb113131cc116b2a7159358ca",
-    "package/replication/pins.json": "4f752dfd34f27ad49be731f3e77095f8bb271890b6445cae1d6e838055ba5d21",
+    "package/replication/host.py": "c41a297bf3d7abb2afd6e6694648bc5d648839f98ed2b6f9bf0cbd5eba822bbf",
+    "package/replication/pins.json": "8a389cb8365324cfc80341b6f519e15128f6438695b14a47162d7b415bac84ac",
     "package/replication/run.py": "b0de82bdf8297f88b46ba6041477bd1bb53ead166f41f758a4366f77f9c9ce8c",
-    "package/replication/setup.py": "d3131827c6ecf9a1622610f5589b720c273ede8b4a80bf710df65d26b0539dd5"
+    "package/replication/setup.py": "fe8e2283c56eb20a8e9c10111737f80814a5794c5a2faf4016e3da9b538ad874"
   },
   "historical_lock_sha256": "e4c6d4ae515a5d263d1d7fe05580e0265835c2bb6ac1d3f7b9e4bcd64582dac8",
   "historical_rule_module_version": 7,

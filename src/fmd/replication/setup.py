@@ -108,19 +108,23 @@ def windows_parsers() -> Path:
     return host.cache() / "windows-parsers"
 
 
-def base() -> dict:
-    """Install the Windows base from Microsoft's ISO (ci/windows/install.py, as CI builds it) and
-    place it where the QEMU provider looks for it. About 40 minutes, once per host."""
+def base(iso: Path | None = None) -> dict:
+    """Install the Windows base from Microsoft's Windows 11 ISO (ci/windows/install.py, as CI builds it)
+    and place it where the QEMU provider looks for it. About 50 minutes, once per host."""
     from fmd.generation.recipe import qemu_box
 
     facts = host.base_guest_facts()
     if facts is not None:
         return facts
+    pin = host.PINS["windows_iso"]
+    if iso is None:
+        raise SystemExit(f"the Windows base is built from Microsoft's ISO: download {pin['choose']} from "
+                         f"{pin['download']} ({pin['file']}), then run: fmd replicate setup --iso <that file>")
     work = host.cache() / "base-build"
     pins = host.PINS["base_builder"]
     run(["uv", "run", "--no-project", "--with", f"pycdlib=={pins['pycdlib']}", "--with", f"pywinrm=={pins['pywinrm']}",
          "--with", f"psutil=={pins['psutil']}", "--with", "tzdata", "python", host.REPO / "ci" / "windows" / "install.py",
-         "--iso-url", host.PINS["windows_iso"]["url"], "--work", work])
+         "--iso-url", Path(iso).resolve(), "--iso-sha256", pin["sha256"], "--edition", pin["edition"], "--work", work])
     box = host.base_home() / qemu_box().replace("/", "-VAGRANTSLASH-") / "0"
     target = box / "amd64" / "qemu"
     target.mkdir(parents=True, exist_ok=True)
@@ -131,9 +135,9 @@ def base() -> dict:
     return json.loads((box / "guest.json").read_text(encoding="utf-8"))
 
 
-def all_steps(*, build_base: bool = True) -> None:
+def all_steps(*, build_base: bool = True, iso: Path | None = None) -> None:
     dotnet_runtime()
     ansible()
     toolchain()
     if build_base and host.provider() == "qemu":
-        log(f"base guest: {base()}")
+        log(f"base guest: {base(iso)}")

@@ -1,9 +1,12 @@
 {
   "schema_version": "fmd_replication_pins.v1",
   "windows_iso": {
-    "url": "https://go.microsoft.com/fwlink/?LinkId=2382600&clcid=0x409&culture=en-us&country=us",
-    "note": "Windows 11 Enterprise Evaluation x64 (en-US). Microsoft refreshes this link; the base build records the ISO's sha256 and the guest build in guest.json, and the dependency lock pins the result.",
-    "sha256_when_pinned": "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38"
+    "edition": "pro",
+    "download": "https://www.microsoft.com/software-download/windows11",
+    "choose": "Windows 11 (multi-edition ISO for x64 devices), then English (United States)",
+    "file": "Windows11_Client_x64_en-us_26300_9457.iso",
+    "sha256": "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
+    "note": "Microsoft's consumer ISO, build 26300.9457, as the CI base. Its links last 24 hours, so you download it yourself. The base is Windows 11 Pro on the paper's generic volume key, never activated, as the paper's base was. The Enterprise Evaluation is not used: its activation does not survive generation's virtual hardware, and an unactivated evaluation shuts down hourly."
   },
   "eztools": {
     "url": "https://github.com/glidingikaros/fmd-replication/releases/download/eztools-locked-v1/eztools-net9-locked.tar.gz",

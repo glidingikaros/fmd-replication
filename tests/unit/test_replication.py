@@ -46,13 +46,25 @@ def test_a_failure_while_provisioning_is_retried_and_others_are_not():
     assert not run.RETRYABLE.search(phase % "disk_discovery_export")
 
 
+def test_the_base_needs_an_iso_the_user_downloads_and_says_where_from(monkeypatch):
+    from fmd.replication import setup
+
+    monkeypatch.setattr(host, "base_guest_facts", lambda: None)
+    with pytest.raises(SystemExit) as stopped:
+        setup.base()
+    pin = host.PINS["windows_iso"]
+    assert pin["download"] in str(stopped.value) and "--iso" in str(stopped.value)
+    assert pin["edition"] == "pro" and len(pin["sha256"]) == 64
+
+
 def test_the_cli_offers_doctor_setup_and_run(capsys):
     for action in ("doctor", "setup", "run"):
         try:
             main(["replicate", action, "--help"])
         except SystemExit as exit:
             assert exit.code == 0
-    assert "I1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "I1" in out and "--iso" in out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="pip writes .exe launchers on Windows; fmd checks console scripts on POSIX only")

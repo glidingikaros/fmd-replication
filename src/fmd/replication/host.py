@@ -134,5 +134,7 @@ def checks() -> list[tuple[str, bool, str]]:
               f"wsl --install -d {distro} --no-launch; wsl --set-version {distro} 1")
     check(rows, "Ansible with WinRM", which("ansible-playbook"), "run: fmd replicate setup")
     facts = base_guest_facts()
-    check(rows, "Windows base image", facts and f"build {facts['build']}", "run: fmd replicate setup (about 40 minutes)")
+    iso = PINS["windows_iso"]
+    check(rows, "Windows base image", facts and f"build {facts['build']}",
+          f"download {iso['file']} from {iso['download']}, then run: fmd replicate setup --iso <that file> (~50 min)")
     return rows
