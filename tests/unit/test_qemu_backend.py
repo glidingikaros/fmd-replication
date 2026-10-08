@@ -70,6 +70,15 @@ def test_the_qemu_paper_config_differs_from_the_paper_only_in_provider_and_box()
         recipe.paper_config("I1", "virtualbox")
 
 
+def test_an_adhoc_module_without_arguments_gets_no_raw_params(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+    backends.ansible_adhoc("ansible", 5985, "ansible.windows.win_ping", {}, timeout=10)
+    backends.ansible_adhoc("ansible", 5985, "ansible.windows.win_powershell", {"script": "hostname"}, timeout=10)
+    assert "-a" not in calls[0]  # ansible-core turns -a '{}' into _raw_params, which win_ping refuses
+    assert calls[1][calls[1].index("-a") + 1] == '{"script": "hostname"}'
+
+
 def test_parsers_run_in_the_appliance_on_macos_natively_on_windows_and_in_qemu_elsewhere(monkeypatch):
     from fmd.collection.tools.host import parser_appliance
 

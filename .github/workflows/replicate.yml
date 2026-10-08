@@ -1,9 +1,9 @@
 name: Replicate
 
-# The experiment on Linux and Windows hosts: per host, a smoke leg boots the shared base and
-# exercises the guest and parser paths; only if it passes do I1, I2 and I3 run in parallel
-# (generate, collect, deterministic analysis through admission). Push a change to
-# ci/replicate-trigger (it needs the cached base) or dispatch it to run.
+# The experiment on Linux and Windows hosts: per host, I1, I2 and I3 run in parallel (generate,
+# collect, deterministic analysis through admission), next to a smoke leg that boots the shared
+# base and exercises the guest and parser paths within minutes, an early warning to cancel on.
+# Push a change to ci/replicate-trigger (it needs the cached base) or dispatch it to run.
 on:
   push:
     branches: [portability]
@@ -43,7 +43,8 @@ jobs:
     uses: ./.github/workflows/host.yml
     with: {os: windows-2025, image: I1, stage: smoke, base: "${{ needs.plan.outputs.base }}"}
   linux:
-    needs: [plan, smoke-linux]
+    needs: plan
+    if: contains(needs.plan.outputs.hosts, 'linux')
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +52,8 @@ jobs:
     uses: ./.github/workflows/host.yml
     with: {os: ubuntu-24.04, image: "${{ matrix.image }}", stage: full, base: "${{ needs.plan.outputs.base }}"}
   windows:
-    needs: [plan, smoke-windows]
+    needs: plan
+    if: contains(needs.plan.outputs.hosts, 'windows')
     strategy:
       fail-fast: false
       matrix:

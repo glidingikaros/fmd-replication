@@ -230,7 +230,10 @@ def ansible_adhoc(ansible: str, port: int, module: str, args: dict, *, timeout: 
     import json
     import subprocess
 
-    return subprocess.run([ansible, "all", "-i", "127.0.0.1,", "-m", module, "-a", json.dumps(args),
+    # no -a for a module without arguments: ansible-core reads an empty JSON object as a raw
+    # parameter, which modules such as win_ping refuse
+    module_args = ["-a", json.dumps(args)] if args else []
+    return subprocess.run([ansible, "all", "-i", "127.0.0.1,", "-m", module, *module_args,
                            "-e", json.dumps(ansible_winrm_vars(port))],
                           capture_output=True, text=True, timeout=timeout)
 
