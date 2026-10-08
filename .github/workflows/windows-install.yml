@@ -5,6 +5,20 @@ on:
     branches: [portability]
     paths: [.github/workflows/windows-install.yml, ci/windows/**]
   workflow_dispatch:
+    inputs:
+      edition:
+        description: "eval: Enterprise Evaluation (activated online); pro: Windows 11 Pro on the paper's generic volume key"
+        type: choice
+        options: [eval, pro]
+        default: eval
+      iso_url:
+        description: "The ISO to install; empty means the Enterprise Evaluation link. Pro needs the consumer ISO's link from microsoft.com/software-download/windows11 (valid 24 hours)"
+        type: string
+        default: ""
+      iso_sha256:
+        description: "The ISO's SHA-256 as Microsoft publishes it (checked after the download)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -29,7 +43,9 @@ jobs:
             os: ubuntu-24.04
             cpu: host,-vmx,-svm,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time  # as generation uses on KVM
     env:
-      ISO_URL: https://go.microsoft.com/fwlink/?LinkId=2382600&clcid=0x409&culture=en-us&country=us
+      ISO_URL: ${{ inputs.iso_url || 'https://go.microsoft.com/fwlink/?LinkId=2382600&clcid=0x409&culture=en-us&country=us' }}
+      ISO_SHA256: ${{ inputs.iso_sha256 }}
+      EDITION: ${{ inputs.edition || 'eval' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -57,12 +73,12 @@ jobs:
       - name: Install Windows 11 and wait for WinRM
         run: >-
           uv run --no-project --with pycdlib==1.14.0 --with pywinrm==0.5.0 --with psutil==7.1.0 --with tzdata
-          python ci/windows/install.py --iso-url "${{ env.ISO_URL }}" --work "${{ runner.temp }}/win-work" --cpu "${{ matrix.cpu }}"
+          python ci/windows/install.py --iso-url "$ISO_URL" --iso-sha256 "$ISO_SHA256" --edition "$EDITION" --work "${{ runner.temp }}/win-work" --cpu "${{ matrix.cpu }}"
       - name: Cache the installed base
         if: success()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: win11-x64-26300-${{ matrix.variant }}-${{ hashFiles('ci/windows/install.py', 'ci/windows/autounattend.xml', 'ci/windows/scripts/**', 'tools/base-image/windows11-arm64/scripts/**') }}
+          key: win11-x64-26300-${{ env.EDITION == 'pro' && 'pro-' || '' }}${{ matrix.variant }}-${{ hashFiles('ci/windows/install.py', 'ci/windows/autounattend.xml', 'ci/windows/scripts/**', 'tools/base-image/windows11-arm64/scripts/**') }}
           path: |
             ${{ runner.temp }}/win-work/base.qcow2
             ${{ runner.temp }}/win-work/base-vars.fd

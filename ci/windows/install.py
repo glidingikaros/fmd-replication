@@ -6,7 +6,9 @@ with auto-logon, Pacific time, updates off, built on a NAT network like the
 paper's, then restarted and taken offline by the paper's offline-base.ps1 (which
 also leaves the event logs uncompressed). As there, WinRM comes up from the
 first-logon commands, so it answers only once Setup and OOBE are over. The
-Enterprise Evaluation activates while the network is up. Before the base is kept,
+Enterprise Evaluation activates while the network is up; --edition pro instead installs
+Windows 11 Pro from Microsoft's consumer ISO on the generic volume key, never activated, as the
+paper's base was. Before the base is kept,
 one boot of an overlay under generation's conditions (no route out, new NICs,
 the biased clock) must reach WinRM and vagrant's own desktop. Everything lives
 under --work; the finished base is written there as a zstd-compressed qcow2,
@@ -53,6 +55,10 @@ PRODUCT = ("$p = Get-CimInstance SoftwareLicensingProduct -Filter "
 LICENSE = PRODUCT + ("ConvertTo-Json -Compress @{name = $p.Name; status = [int]$p.LicenseStatus;"
                      " grace_minutes = [int]$p.GracePeriodRemaining; evaluation_end = [string]$p.EvaluationEndDate}")
 ACTIVATE = PRODUCT + "Invoke-CimMethod -InputObject $p -MethodName Activate | Out-Null"
+# --edition pro: the paper's base edition and its generic volume licence key (no activation)
+PRO_IMAGE = ("<InstallFrom><MetaData wcm:action=\"add\"><Key>/IMAGE/NAME</Key><Value>Windows 11 Pro</Value>"
+             "</MetaData></InstallFrom>")
+PRO_KEY = "<ProductKey><Key>W269N-WFGWX-YVC9B-4J6C9-T83GX</Key><WillShowUI>OnError</WillShowUI></ProductKey>"
 FACTS = ("$o = Get-CimInstance Win32_OperatingSystem; $v = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';"
          "ConvertTo-Json -Compress @{build = [string]$o.BuildNumber; ubr = [int]$v.UBR; display_version = [string]$v.DisplayVersion;"
          " timezone = (Get-TimeZone).Id; locale = (Get-Culture).Name; caption = $o.Caption}")
@@ -96,7 +102,7 @@ def firmware(qemu: Path) -> tuple[Path, Path]:
     raise SystemExit("no x86_64 UEFI firmware found next to QEMU or in /usr/share/OVMF")
 
 
-def download(url: str, target: Path) -> None:
+def download(url: str, target: Path, sha256: str | None) -> None:
     started = time.monotonic()
     digest = hashlib.sha256()
     with urllib.request.urlopen(url, timeout=60) as response, target.open("wb") as out:
@@ -105,9 +111,11 @@ def download(url: str, target: Path) -> None:
             out.write(chunk)
             digest.update(chunk)
     log(f"iso: {target.stat().st_size} bytes, sha256 {digest.hexdigest()}, {time.monotonic() - started:.0f}s")
+    if sha256 and digest.hexdigest() != sha256.lower():
+        raise SystemExit(f"the ISO's sha256 is not the published {sha256.lower()}")
 
 
-def answer_iso(target: Path) -> None:
+def answer_iso(target: Path, edition: str) -> None:
     iso = pycdlib.PyCdlib()
     iso.new(interchange_level=4, joliet=3)
 
@@ -116,7 +124,14 @@ def answer_iso(target: Path) -> None:
     def add(data: bytes, name: str, folder: str = "") -> None:
         iso.add_fp(io.BytesIO(data), len(data), f"{folder}/{name};1", joliet_path=f"{folder}/{name}")
 
-    add((HERE / "autounattend.xml").read_bytes(), "autounattend.xml")
+    answers = (HERE / "autounattend.xml").read_text(encoding="utf-8")
+    if edition == "pro":
+        index = ("<InstallFrom><MetaData wcm:action=\"add\"><Key>/IMAGE/INDEX</Key><Value>1</Value></MetaData>"
+                 "</InstallFrom>")
+        assert index in answers and "<Organization>FMD</Organization>" in answers
+        answers = answers.replace(index, PRO_IMAGE).replace("<Organization>FMD</Organization>",
+                                                            "<Organization>FMD</Organization>" + PRO_KEY)
+    add(answers.encode("utf-8"), "autounattend.xml")
     iso.add_directory("/scripts", joliet_path="/scripts")
     for name in BASE_SCRIPTS:
         add((PAPER_SCRIPTS / name).read_bytes(), name, "/scripts")
@@ -274,6 +289,12 @@ def activate(winrm_port: int) -> dict:
     raise SystemExit(f"the evaluation licence did not activate: {facts}")
 
 
+def licensed(facts: dict) -> bool:
+    """An evaluation must stay activated (unactivated or expired, it shuts down hourly); Pro on the
+    generic volume key stays unactivated, as the paper's base did."""
+    return facts["status"] == 1 or "Eval" not in facts["name"]
+
+
 def base_script(winrm_port: int, name: str) -> str:
     """One of the paper's base scripts, run as its Packer provisioner runs it (script execution is
     disabled for remote PowerShell)."""
@@ -285,10 +306,10 @@ def base_script(winrm_port: int, name: str) -> str:
     return output
 
 
-def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int) -> None:
+def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int, edition: str) -> None:
     """After the install: activate, restart and settle as the paper's base build did, record the
     guest, and take it offline with the paper's offline-base.ps1."""
-    license_facts = activate(winrm_port)
+    license_facts = activate(winrm_port) if edition == "eval" else json.loads(guest(winrm_port, LICENSE))
     log(f"licence: {license_facts}")
     # What the first logon left, then the paper's enable-autologon.ps1 once more (idempotent): no
     # one-time autologon count from OOBE may turn vagrant's logon off at a later boot.
@@ -302,7 +323,7 @@ def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int)
     interactive(winrm_port)  # generation waits for exactly this session
     license_now = json.loads(guest(winrm_port, LICENSE))
     log(f"licence after the restart: {license_now}")
-    if license_now["status"] != 1:
+    if not licensed(license_now):
         raise RuntimeError(f"the evaluation licence did not survive the restart: {license_now}")
     time.sleep(180)
     # Build 22000 had no Explorer tabs: open folders in their own windows, as the ShellBag scenario expects.
@@ -353,7 +374,7 @@ def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
         state = json.loads(guest(winrm_port, SETUP_STATE))
         license_now = json.loads(guest(winrm_port, LICENSE))
         log(f"verify: setup and autologon {state}; licence {license_now}")
-        if state != SETUP_DONE or license_now["status"] != 1:
+        if state != SETUP_DONE or not licensed(license_now):
             raise SystemExit(f"the base does not boot finished and licensed: {state}, {license_now}")
     except (Exception, SystemExit):
         log(f"verify failed; WinRM listener from the host: {wsman_status(winrm_port)}; console diagnostic in shots/")
@@ -374,6 +395,8 @@ def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iso-url", required=True)
+    parser.add_argument("--iso-sha256", help="the ISO's published SHA-256, checked after the download")
+    parser.add_argument("--edition", choices=("eval", "pro"), default="eval")
     parser.add_argument("--work", type=Path, default=Path("win-work"))
     parser.add_argument("--cpu", help="QEMU -cpu value; default hides VT-x/AMD-V from the guest")
     parser.add_argument("--deadline-min", type=int, default=75)  # Setup, OOBE and first logon
@@ -388,8 +411,8 @@ def main() -> int:
     log(f"host {platform.system()} {platform.machine()} {platform.processor()}, accelerator {accelerator}, cpu {cpu}")
     log(subprocess.run([str(qemu), "--version"], capture_output=True, text=True).stdout.splitlines()[0])
 
-    download(args.iso_url, work / "win.iso")
-    answer_iso(work / "answer.iso")
+    download(args.iso_url, work / "win.iso", args.iso_sha256)
+    answer_iso(work / "answer.iso", args.edition)
     shutil.copyfile(code, work / "code.fd")
     shutil.copyfile(variables, work / "vars.fd")
     winrm_port, monitor_port = free_port(), free_port()
@@ -454,7 +477,7 @@ def main() -> int:
         # the guest and finishes again instead of throwing the install away.
         for round_number in range(1, 4):
             try:
-                finish(vm, work, winrm_port, monitor_port)
+                finish(vm, work, winrm_port, monitor_port, args.edition)
                 break
             except Exception as error:
                 if round_number == 3:

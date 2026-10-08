@@ -32,7 +32,7 @@ FACTS = ("$o = Get-CimInstance Win32_OperatingSystem;"
          " arch = $o.OSArchitecture; caption = $o.Caption;"
          " profiles = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory });"
          " addresses = @(Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.IPAddress + '/' + $_.PrefixLength });"
-         " license_status = [int]$p.LicenseStatus; license_grace_minutes = [int]$p.GracePeriodRemaining;"
+         " license_status = [int]$p.LicenseStatus; license_grace_minutes = [int]$p.GracePeriodRemaining; license_name = [string]$p.Name;"
          " eventlogs_compressed = ([bool]((Get-Item $logs).Attributes -band [IO.FileAttributes]::Compressed) -or"
          " [bool]((Get-Item \"$logs\\Security.evtx\").Attributes -band [IO.FileAttributes]::Compressed));"
          " where_year = (Get-Item C:\\Windows\\System32\\where.exe).LastWriteTimeUtc.Year;"
@@ -169,10 +169,13 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
         log(f"guest facts: {report.get('facts')}")
         guest_facts = report.get("facts") if isinstance(report.get("facts"), dict) else {}
         report["facts_match"] = all(guest_facts.get(key) == value for key, value in expected.items())
-        # what the paper's base guaranteed: an active licence (an expired evaluation shuts down hourly),
+        # what the paper's base guaranteed: a licence that keeps Windows up (an unactivated or expired
+        # evaluation shuts down hourly; Pro on the generic volume key, as the paper's, stays unactivated),
         # uncompressed event logs (post-export injection and collection read them raw) and a where.exe
         # older than 2026 (the pilot's old-copy control)
-        report["base_ready"] = (guest_facts.get("license_status") == 1 and guest_facts.get("eventlogs_compressed") is False
+        licence_ok = (guest_facts.get("license_status") == 1
+                      or "Eval" not in str(guest_facts.get("license_name", "Eval")))
+        report["base_ready"] = (licence_ok and guest_facts.get("eventlogs_compressed") is False
                                 and isinstance(guest_facts.get("where_year"), int) and guest_facts["where_year"] < 2026)
 
         checkpoint = work / "checkpoint dir"  # a space, as host paths may have
