@@ -28,6 +28,7 @@ jobs:
         with:
           version: "0.9.9"
           python-version: "3.13.5"
+          enable-cache: false  # the Windows base needs nearly all of the repository's 10 GB of cache
       - name: Install
         run: uv sync --locked --extra dev --extra generation --extra factual --extra collection
       - name: CLI

@@ -70,6 +70,7 @@ jobs:
         with:
           version: "0.9.9"
           python-version: "3.13.5"
+          enable-cache: false  # the Windows base needs nearly all of the repository's 10 GB of cache
       - name: Install Windows 11 and wait for WinRM
         run: >-
           uv run --no-project --with pycdlib==1.14.0 --with pywinrm==0.5.0 --with psutil==7.1.0 --with tzdata

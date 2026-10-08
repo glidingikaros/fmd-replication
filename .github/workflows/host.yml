@@ -69,6 +69,7 @@ jobs:
         with:
           version: "0.9.9"
           python-version: "3.13.5"
+          enable-cache: false  # the Windows base needs nearly all of the repository's 10 GB of cache
       - run: uv sync --locked --all-extras
 
       # What REPLICATE.md asks a user to install by hand.
@@ -88,6 +89,7 @@ jobs:
           distribution: Ubuntu-24.04
           wsl-version: 1
           additional-packages: python3-venv
+          use-cache: false  # the Windows base needs nearly all of the repository's 10 GB of cache
 
       - name: fmd replicate setup (tools; the base comes from the cache below)
         run: |
