@@ -157,5 +157,8 @@ jobs:
             ${{ env.WORK }}/replication/*/run/run-manifest.json
             ${{ env.WORK }}/replication/*/run/**/setupapi.dev.log
             ${{ env.WORK }}/replication/*/run/**/*setupapi*.observations.json
+            ${{ env.WORK }}/replication/*/run/analysis/evidence_index.json
+            ${{ env.WORK }}/replication/*/run/analysis/factual-supplement/evidence-index.json
+            ${{ env.WORK }}/replication/*/generation/**/ground_truth.json
           retention-days: 5
           if-no-files-found: warn
