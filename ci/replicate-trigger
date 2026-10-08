@@ -1,4 +1,4 @@
 Replicate run on the cached base (win11-x64-26300); base: pro or eval, hosts: linux and/or windows
 hosts: linux windows
-base: eval
-run: 2
+base: pro
+run: 3
