@@ -149,5 +149,7 @@ jobs:
             ${{ env.WORK }}/replication/*/generation/**/*.png
             ${{ env.WORK }}/replication/*/run/gates/*.json
             ${{ env.WORK }}/replication/*/run/run-manifest.json
+            ${{ env.WORK }}/replication/*/run/**/setupapi.dev.log
+            ${{ env.WORK }}/replication/*/run/**/*setupapi*.observations.json
           retention-days: 5
           if-no-files-found: warn

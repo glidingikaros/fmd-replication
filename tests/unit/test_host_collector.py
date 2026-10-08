@@ -1139,3 +1139,16 @@ def test_empty_resident_stream_copies_as_empty_bytes(tmp_path: Path) -> None:
     copied = bytearray()
     report = index.copy_stream(24, "", copied.extend)
     assert copied == b"" and report.bytes_written == 0 and report.resident
+
+
+def test_required_artifact_patterns_ignore_case_as_windows_paths_do(tmp_path):
+    from fmd.collection.tools.host.validation import any_case, assert_required_kape_artifacts
+
+    # KAPE declares winevt\logs; the pattern spells Windows' winevt\Logs. Linux file systems keep the difference.
+    log = tmp_path / "targets" / "C" / "Windows" / "System32" / "winevt" / "logs" / "Security.evtx"
+    log.parent.mkdir(parents=True)
+    log.write_bytes(b"ElfFile")
+    checks: list[dict] = []
+    assert_required_kape_artifacts(tmp_path, ["targets/*/Windows/System32/winevt/Logs/*.evtx"], checks=checks)
+    assert checks[-1]["status"] == "pass"
+    assert any_case("targets/*/$MFT") == "[tT][aA][rR][gG][eE][tT][sS]/*/$[mM][fF][tT]"

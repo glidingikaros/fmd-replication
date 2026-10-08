@@ -95,7 +95,7 @@ def assert_no_appliance_metadata_contamination(
             "marker": found,
         }
         for pattern in KAPE_METADATA_MARKER_GLOBS
-        for metadata_path in sorted(output_root.glob(pattern))
+        for metadata_path in sorted(output_root.glob(any_case(pattern)))
         if metadata_path.is_file() and (found := file_contains_any_marker(metadata_path, markers))
     ]
     if appliance_marker_issues:
@@ -108,6 +108,13 @@ def assert_no_appliance_metadata_contamination(
     )
 
 
+def any_case(pattern: str) -> str:
+    """A glob pattern that ignores letter case, as Windows paths do. The extractor names directories
+    after KAPE's declarations (winevt\\logs) while these patterns spell Windows' own (winevt/Logs);
+    a case-insensitive file system (macOS, Windows) hid the difference, Linux does not."""
+    return "".join(f"[{char.lower()}{char.upper()}]" if char.isalpha() else char for char in pattern)
+
+
 def assert_required_kape_artifacts(
     output_root: Path,
     required_artifact_globs: list[str] | None,
@@ -115,7 +122,7 @@ def assert_required_kape_artifacts(
     checks: list[dict[str, Any]],
 ) -> None:
     for pattern in required_artifact_globs or []:
-        matches = list(output_root.glob(pattern))
+        matches = list(output_root.glob(any_case(pattern)))
         if not matches:
             raise KapeApplianceError(
                 f"required KAPE artifact pattern missing: {pattern}"
