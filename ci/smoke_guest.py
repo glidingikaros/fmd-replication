@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import socket
 import subprocess
 import sys
 import tempfile
@@ -24,6 +23,7 @@ from pathlib import Path
 from fmd.collection.tools.host import parser_appliance
 from fmd.generation import recipe
 from fmd.generation.backends import QemuBackend, _free_port, ansible_adhoc, ansible_winrm_vars, prepare_overlay
+from guest_console import diagnose, wsman_status
 
 FACTS = ("$o = Get-CimInstance Win32_OperatingSystem;"
          " $p = Get-CimInstance SoftwareLicensingProduct -Filter \"ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'"
@@ -67,70 +67,6 @@ def answered(ansible: str, port: int, report: dict) -> bool:
         return False
     report["last_ansible_output"] = (result.stdout[-1500:] + result.stderr[-1500:]).strip()
     return result.returncode == 0
-
-
-def wsman_status(port: int) -> str:
-    """The guest's WinRM listener seen from the host without Ansible: an unauthenticated POST gets 401."""
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=20) as connection:
-            connection.settimeout(20)
-            connection.sendall(b"POST /wsman HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
-            return connection.recv(200).decode(errors="replace").splitlines()[0] or "empty reply"
-    except (OSError, IndexError) as error:
-        return f"{type(error).__name__}: {error}"
-
-
-KEY_NAMES = {" ": "spc", "-": "minus", "=": "equal", ".": "dot", ",": "comma", "/": "slash", "\\": "backslash",
-             ";": "semicolon", "'": "apostrophe", "[": "bracket_left", "]": "bracket_right", "\n": "ret"}
-SHIFTED = {"|": "backslash", "&": "7", ">": "dot", "<": "comma", '"': "apostrophe", ":": "semicolon", "_": "minus",
-           "+": "equal", "(": "9", ")": "0", "{": "bracket_left", "}": "bracket_right", "$": "4", "@": "2",
-           "!": "1", "?": "slash", "*": "8", "%": "5", "#": "3"}
-# What the console shows when WinRM stays silent: addresses, the WinRM service and listener, the
-# network profiles, Winlogon's autologon values, then the latest System warnings and WinRM events.
-CONSOLE_CHECKS = (
-    ["ipconfig | findstr /i \"adapter ipv4\"",
-     "Get-Service WinRM,MpsSvc,sppsvc | ft -a Name,Status,StartType",
-     "netstat -ano -p tcp | findstr 5985",
-     "Test-WSMan | ft -a ProductVersion",
-     "Get-NetConnectionProfile | ft -a InterfaceAlias,NetworkCategory,IPv4Connectivity",
-     "gp 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' | fl AutoAdminLogon,DefaultUserName,AutoLogonCount"],
-    ["cls",
-     "Get-WinEvent -FilterHashtable @{LogName='System';Level=1,2,3} -MaxEvents 12 | ft -a TimeCreated,Id,ProviderName",
-     "Get-WinEvent -LogName Microsoft-Windows-WinRM/Operational -MaxEvents 5 | ft -a TimeCreated,Id,Message -Wrap"],
-)
-
-
-def typed(text: str) -> list[str]:
-    """Monitor sendkey commands that type text on the guest's US keyboard."""
-    commands = []
-    for char in text:
-        key = ("shift-" + SHIFTED[char] if char in SHIFTED else "shift-" + char.lower() if char.isupper()
-               else KEY_NAMES.get(char, char))
-        commands.append(f"sendkey {key} 40")
-    return commands
-
-
-def monitor_commands(port: int, commands: list[str], settle: float) -> None:
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
-        connection.recv(4096)
-        for command in commands:
-            connection.sendall(command.encode() + b"\n")
-            time.sleep(0.05)
-    time.sleep(settle)
-
-
-def console_diagnostic(port: int, work: Path) -> None:
-    """Log on at the console and screenshot what PowerShell reports (only when WinRM stays silent)."""
-    shots = lambda name: f"screendump {work / f'diagnostic-{name}.png'} -f png"  # noqa: E731
-    monitor_commands(port, ["sendkey ret", "sendkey ret"], 10)
-    monitor_commands(port, [shots("1-logon-prompt")] + typed("vagrant\n"), 90)
-    monitor_commands(port, [shots("2-after-logon"), "sendkey meta_l-r"], 8)
-    monitor_commands(port, typed("powershell\n"), 40)
-    monitor_commands(port, ["sendkey meta_l-up"], 5)
-    for number, lines in enumerate(CONSOLE_CHECKS, start=3):
-        text = "\n".join(lines) + "\n"
-        monitor_commands(port, typed(text), 0.2 * len(text) + 30)
-        monitor_commands(port, [shots(f"{number}-console")], 2)
 
 
 def probe(report: dict, key: str, check) -> None:
@@ -195,7 +131,7 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
                 log("no WinRM after 12 minutes: logging on at the console for a diagnostic")
                 report["console_diagnostic"] = round(elapsed)  # a smoke check that needed this fails
                 try:
-                    console_diagnostic(backend.monitor_port, work)
+                    diagnose(backend.monitor_port, work)
                 except OSError as error:
                     log(f"console diagnostic: {error}")
             if process.poll() is not None:

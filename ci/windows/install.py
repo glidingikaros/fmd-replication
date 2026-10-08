@@ -23,6 +23,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,9 @@ import pycdlib
 import winrm
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from guest_console import diagnose, wsman_status  # noqa: E402
+
 PAPER_SCRIPTS = HERE.parents[1] / "tools" / "base-image" / "windows11-arm64" / "scripts"
 BASE_SCRIPTS = ("disable-sleep-hibernate.ps1", "set-network-private.ps1", "disable-update-reboots.ps1",
                 "disable-automatic-updates.ps1", "enable-autologon.ps1", "offline-base.ps1")
@@ -296,6 +300,10 @@ def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int)
     time.sleep(90)
     log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 1800, "restart"))
     interactive(winrm_port)  # generation waits for exactly this session
+    license_now = json.loads(guest(winrm_port, LICENSE))
+    log(f"licence after the restart: {license_now}")
+    if license_now["status"] != 1:
+        raise RuntimeError(f"the evaluation licence did not survive the restart: {license_now}")
     time.sleep(180)
     # Build 22000 had no Explorer tabs: open folders in their own windows, as the ShellBag scenario expects.
     guest(winrm_port, "Set-ItemProperty HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"
@@ -340,12 +348,20 @@ def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
     with (work / "qemu.log").open("a") as qemu_log:
         vm = subprocess.Popen(command, cwd=work, stdout=qemu_log, stderr=subprocess.STDOUT)
     try:
-        log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 1800, "verify"))
+        log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 900, "verify"))
         interactive(winrm_port)
         state = json.loads(guest(winrm_port, SETUP_STATE))
-        log(f"verify: setup and autologon {state}")
-        if state != SETUP_DONE:
-            raise SystemExit(f"the base does not boot finished: {state}")
+        license_now = json.loads(guest(winrm_port, LICENSE))
+        log(f"verify: setup and autologon {state}; licence {license_now}")
+        if state != SETUP_DONE or license_now["status"] != 1:
+            raise SystemExit(f"the base does not boot finished and licensed: {state}, {license_now}")
+    except (Exception, SystemExit):
+        log(f"verify failed; WinRM listener from the host: {wsman_status(winrm_port)}; console diagnostic in shots/")
+        try:
+            diagnose(monitor_port, work / "shots")
+        except OSError as error:
+            log(f"console diagnostic: {error}")
+        raise
     finally:
         monitor(monitor_port, "screendump shots/verify-last.png -f png")
         time.sleep(3)
