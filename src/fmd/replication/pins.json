@@ -1,0 +1,22 @@
+{
+  "schema_version": "fmd_replication_pins.v1",
+  "windows_iso": {
+    "url": "https://go.microsoft.com/fwlink/?LinkId=2382600&clcid=0x409&culture=en-us&country=us",
+    "note": "Windows 11 Enterprise Evaluation x64 (en-US). Microsoft refreshes this link; the base build records the ISO's sha256 and the guest build in guest.json, and the dependency lock pins the result.",
+    "sha256_when_pinned": "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38"
+  },
+  "eztools": {
+    "url": "https://github.com/glidingikaros/fmd-replication/releases/download/eztools-locked-v1/eztools-net9-locked.tar.gz",
+    "release": {"repository": "glidingikaros/fmd-replication", "tag": "eztools-locked-v1", "asset": "eztools-net9-locked.tar.gz"},
+    "sha256": "ea08df43c5e3b09c9a156a5a76c1bdefe9866bf394630145c1b1dda7131c818c",
+    "note": "The exact bytes eztools-lock.json pins. Source builds cannot reproduce them: Costura compresses embedded dependencies with CPU-specific code paths and 46 RegistryPlugins stamp the build time into AssemblyVersion(\"1.0.*\")."
+  },
+  "windows_parsers": {
+    "PECmd.exe": "https://download.ericzimmermanstools.com/PECmd.zip",
+    "SBECmd.exe": "https://download.ericzimmermanstools.com/SBECmd.zip"
+  },
+  "dotnet_runtime": {"channel": "10.0", "version": "10.0.7"},
+  "ansible": {"ansible-core": "2.20.5", "pywinrm": "0.5.0", "ansible.windows": "3.5.0"},
+  "base_builder": {"pycdlib": "1.14.0", "pywinrm": "0.5.0", "psutil": "7.1.0"},
+  "wsl_distribution": "Ubuntu-24.04"
+}

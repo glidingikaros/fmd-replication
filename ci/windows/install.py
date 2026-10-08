@@ -1,0 +1,470 @@
+"""Install the Windows 11 x64 base unattended under QEMU and confirm WinRM.
+
+The same script runs on Linux (KVM), Windows (WHPX) and macOS (HVF). The guest
+mirrors the paper's ARM64 base (tools/base-image/windows11-arm64): user vagrant
+with auto-logon, Pacific time, updates off, built on a NAT network like the
+paper's, then restarted and taken offline by the paper's offline-base.ps1 (which
+also leaves the event logs uncompressed). As there, WinRM comes up from the
+first-logon commands, so it answers only once Setup and OOBE are over. The
+Enterprise Evaluation activates while the network is up. Before the base is kept,
+one boot of an overlay under generation's conditions (no route out, new NICs,
+the biased clock) must reach WinRM and vagrant's own desktop. Everything lives
+under --work; the finished base is written there as a zstd-compressed qcow2,
+with the guest facts in guest.json.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import platform
+import shutil
+import socket
+import subprocess
+import time
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import psutil
+import pycdlib
+import winrm
+
+HERE = Path(__file__).resolve().parent
+PAPER_SCRIPTS = HERE.parents[1] / "tools" / "base-image" / "windows11-arm64" / "scripts"
+BASE_SCRIPTS = ("disable-sleep-hibernate.ps1", "set-network-private.ps1", "disable-update-reboots.ps1",
+                "disable-automatic-updates.ps1", "enable-autologon.ps1", "offline-base.ps1")
+CI_SCRIPTS = ("enable-winrm-ntlm.ps1", "first-logon.ps1")
+ACCELERATORS = {"Linux": "kvm", "Windows": "whpx", "Darwin": "hvf"}
+GUEST_ZONE = ZoneInfo("America/Los_Angeles")  # the base's TimeZone; Windows reads the RTC as local time
+READY = ("if (-not (Test-Path C:\\fmd\\first-logon-complete.txt)) { exit 3 };"
+         "$o = Get-CimInstance Win32_OperatingSystem; $c = Get-Volume -DriveLetter C;"
+         "'{0} | {1} | build {2} | {3} | user {4}' -f $o.Caption, $o.Version, $o.BuildNumber, $o.OSArchitecture, $env:USERNAME;"
+         "'C: {0} {1:N1} GB used' -f $c.FileSystem, (($c.Size - $c.SizeRemaining) / 1GB)")
+PRODUCT = ("$p = Get-CimInstance SoftwareLicensingProduct -Filter "
+           "\"ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL\";")
+LICENSE = PRODUCT + ("ConvertTo-Json -Compress @{name = $p.Name; status = [int]$p.LicenseStatus;"
+                     " grace_minutes = [int]$p.GracePeriodRemaining; evaluation_end = [string]$p.EvaluationEndDate}")
+ACTIVATE = PRODUCT + "Invoke-CimMethod -InputObject $p -MethodName Activate | Out-Null"
+FACTS = ("$o = Get-CimInstance Win32_OperatingSystem; $v = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';"
+         "ConvertTo-Json -Compress @{build = [string]$o.BuildNumber; ubr = [int]$v.UBR; display_version = [string]$v.DisplayVersion;"
+         " timezone = (Get-TimeZone).Id; locale = (Get-Culture).Name; caption = $o.Caption}")
+# Windows Setup and OOBE over, and vagrant logging on at every boot (no AutoLogonCount left to run out)
+SETUP_STATE = ("$s = Get-ItemProperty HKLM:\\SYSTEM\\Setup; $w = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon';"
+               "ConvertTo-Json -Compress @{setup_in_progress = [int]$s.SystemSetupInProgress; oobe_in_progress = [int]$s.OOBEInProgress;"
+               " setup_type = [int]$s.SetupType; autologon = [string]$w.AutoAdminLogon; autologon_user = [string]$w.DefaultUserName;"
+               " autologon_count = [string]$w.AutoLogonCount}")
+SETUP_DONE = {"setup_in_progress": 0, "oobe_in_progress": 0, "setup_type": 0, "autologon": "1",
+              "autologon_user": "vagrant", "autologon_count": ""}
+
+
+def log(message: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def qemu_binary() -> Path:
+    found = shutil.which("qemu-system-x86_64") or r"C:\Program Files\qemu\qemu-system-x86_64.exe"
+    if not Path(found).is_file():
+        raise SystemExit("qemu-system-x86_64 not found")
+    return Path(found).resolve()
+
+
+def qemu_tool(qemu: Path, name: str) -> str:
+    return str(qemu.with_name(qemu.name.replace("qemu-system-x86_64", name)))
+
+
+def firmware(qemu: Path) -> tuple[Path, Path]:
+    pairs = [(Path("/usr/share/OVMF/OVMF_CODE_4M.fd"), Path("/usr/share/OVMF/OVMF_VARS_4M.fd"))]
+    for share in (qemu.parent / "share", qemu.parent.parent / "share" / "qemu"):
+        pairs.append((share / "edk2-x86_64-code.fd", share / "edk2-i386-vars.fd"))
+    for code, variables in pairs:
+        if code.is_file() and variables.is_file():
+            return code, variables
+    raise SystemExit("no x86_64 UEFI firmware found next to QEMU or in /usr/share/OVMF")
+
+
+def download(url: str, target: Path) -> None:
+    started = time.monotonic()
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(url, timeout=60) as response, target.open("wb") as out:
+        log(f"iso: {response.url}")
+        while chunk := response.read(8 << 20):
+            out.write(chunk)
+            digest.update(chunk)
+    log(f"iso: {target.stat().st_size} bytes, sha256 {digest.hexdigest()}, {time.monotonic() - started:.0f}s")
+
+
+def answer_iso(target: Path) -> None:
+    iso = pycdlib.PyCdlib()
+    iso.new(interchange_level=4, joliet=3)
+
+    # Interchange level 4 keeps the real names in the ISO 9660 tables too: Windows read those, so an
+    # upper-cased FIRST_LOGON.PS1 there hid first-logon.ps1 from every first-logon command.
+    def add(data: bytes, name: str, folder: str = "") -> None:
+        iso.add_fp(io.BytesIO(data), len(data), f"{folder}/{name};1", joliet_path=f"{folder}/{name}")
+
+    add((HERE / "autounattend.xml").read_bytes(), "autounattend.xml")
+    iso.add_directory("/scripts", joliet_path="/scripts")
+    for name in BASE_SCRIPTS:
+        add((PAPER_SCRIPTS / name).read_bytes(), name, "/scripts")
+    for name in CI_SCRIPTS:
+        add((HERE / "scripts" / name).read_bytes(), name, "/scripts")
+    iso.write(str(target))
+    iso.close()
+
+
+def monitor(port: int, command: str) -> None:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+            connection.recv(4096)
+            connection.sendall(command.encode() + b"\n")
+            time.sleep(0.3)
+    except OSError:
+        pass
+
+
+def monitor_query(port: int, command: str) -> str:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+            connection.recv(4096)
+            connection.sendall(command.encode() + b"\n")
+            time.sleep(0.5)
+            return connection.recv(65536).decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def disk_writes(port: int) -> int | None:
+    """Bytes the guest has written to the system disk (QEMU's block statistics)."""
+    for line in monitor_query(port, "info blockstats").splitlines():
+        if line.startswith("disk:"):
+            for field in line.split():
+                if field.startswith("wr_bytes="):
+                    return int(field.removeprefix("wr_bytes="))
+    return None
+
+
+class Stalled(Exception):
+    """Windows Setup stopped writing to the disk before first logon (it can hang under nested KVM)."""
+
+
+def session(port: int) -> winrm.Session:
+    # a guest busy with first-logon work can take over a minute just to open a shell
+    return winrm.Session(f"http://127.0.0.1:{port}/wsman", auth=("vagrant", "vagrant"),
+                         transport="ntlm", message_encryption="always",
+                         read_timeout_sec=150, operation_timeout_sec=120)
+
+
+def ready(port: int) -> str | None:
+    try:
+        result = session(port).run_ps(READY)
+    except Exception:
+        return None
+    return result.std_out.decode(errors="replace").strip() if result.status_code == 0 else None
+
+
+def retried(call, attempts: int = 5):
+    """Every call made through this is idempotent, so a transport failure is simply tried again."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except Exception as error:
+            if attempt == attempts:
+                raise
+            log(f"WinRM call failed ({type(error).__name__}: {str(error)[:200]}); retry {attempt}")
+            time.sleep(20)
+
+
+def guest(port: int, script: str) -> str:
+    result = retried(lambda: session(port).run_ps(script))
+    output = result.std_out.decode(errors="replace").strip()
+    if result.status_code != 0:
+        raise RuntimeError(f"guest command failed ({result.status_code}): {output} "
+                           f"{result.std_err.decode(errors='replace')[-1500:]}")
+    return output
+
+
+SERIAL_SEEN = [0]
+GUEST_SPOKE = [False]  # a provisioning line reached COM1: Setup has finished installing
+
+
+def serial_news(work: Path) -> None:
+    """Print the guest's own progress lines (FMD ...) that reached the serial log."""
+    lines = (work / "serial.log").read_bytes().decode(errors="replace").splitlines()
+    for line in lines[SERIAL_SEEN[0]:]:
+        if "FMD" in line:
+            GUEST_SPOKE[0] = True
+            log("guest: " + line[line.index("FMD"):].strip())
+    SERIAL_SEEN[0] = len(lines)
+
+
+def wait_ready(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int, deadline: float,
+               label: str, stall_seconds: int | None = None) -> str:
+    usage = psutil.Process(vm.pid)
+    usage.cpu_percent()
+    tick = 0
+    written, writing_since = None, time.monotonic()
+    while (facts := ready(winrm_port)) is None:
+        serial_news(work)
+        if stall_seconds and not GUEST_SPOKE[0]:
+            now = disk_writes(monitor_port)
+            if now != written:
+                written, writing_since = now, time.monotonic()
+            elif time.monotonic() - writing_since > stall_seconds:
+                raise Stalled(f"no disk writes for {stall_seconds // 60} minutes at {written} bytes")
+        if vm.poll() is not None:
+            raise SystemExit("QEMU exited before WinRM answered:\n"
+                             + (work / "qemu.log").read_text(errors="replace")[-2000:])
+        if time.monotonic() > deadline:
+            raise SystemExit(f"no WinRM ({label})")
+        monitor(monitor_port, f"screendump shots/{label}-{tick:03d}.png -f png")
+        log(f"{label} {tick}: qemu cpu {usage.cpu_percent():.0f}%")
+        tick += 1
+        time.sleep(30)
+    serial_news(work)
+    return facts
+
+
+def interactive(winrm_port: int) -> None:
+    """vagrant logs on to a desktop by itself after a restart (autologon)."""
+    check = ("$e = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue |"
+             " Where-Object { $_.UserName -like '*\\vagrant' }; if (-not $e) { exit 4 }; 'vagrant desktop session up'")
+    for _ in range(20):
+        try:
+            log(guest(winrm_port, check))
+            return
+        except RuntimeError:
+            time.sleep(15)
+    raise RuntimeError("vagrant has no interactive session after the restart: autologon is not working")
+
+
+def power(winrm_port: int, flag: str) -> None:
+    """Ask Windows to restart or power off; the connection may drop as it goes down."""
+    try:
+        session(winrm_port).run_cmd("shutdown", [flag, "/t", "5", "/f"])
+    except Exception as error:
+        log(f"shutdown {flag}: the connection ended ({type(error).__name__}), as Windows went down")
+
+
+def activate(winrm_port: int) -> dict:
+    """The evaluation activates online while the network is up; unactivated, it shuts down hourly."""
+    for attempt in range(6):
+        facts = json.loads(guest(winrm_port, LICENSE))
+        if facts["status"] == 1:
+            return facts
+        log(f"licence not active ({facts}); activating, attempt {attempt + 1}")
+        try:
+            guest(winrm_port, ACTIVATE)
+        except RuntimeError as error:
+            log(str(error)[:800])
+        time.sleep(20)
+    raise SystemExit(f"the evaluation licence did not activate: {facts}")
+
+
+def base_script(winrm_port: int, name: str) -> str:
+    """One of the paper's base scripts, run as its Packer provisioner runs it (script execution is
+    disabled for remote PowerShell)."""
+    result = retried(lambda: session(winrm_port).run_cmd(
+        "powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f"C:\\fmd\\scripts\\{name}"]))
+    output = result.std_out.decode(errors="replace").strip() + result.std_err.decode(errors="replace")[-1500:]
+    if result.status_code != 0:
+        raise RuntimeError(f"{name} exited with {result.status_code}: {output}")
+    return output
+
+
+def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int) -> None:
+    """After the install: activate, restart and settle as the paper's base build did, record the
+    guest, and take it offline with the paper's offline-base.ps1."""
+    license_facts = activate(winrm_port)
+    log(f"licence: {license_facts}")
+    # What the first logon left, then the paper's enable-autologon.ps1 once more (idempotent): no
+    # one-time autologon count from OOBE may turn vagrant's logon off at a later boot.
+    log(f"after first logon: {guest(winrm_port, SETUP_STATE)}")
+    log(base_script(winrm_port, "enable-autologon.ps1"))
+
+    # As the paper's base build: restart, let first-logon work settle, then go offline.
+    power(winrm_port, "/r")
+    time.sleep(90)
+    log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 1800, "restart"))
+    interactive(winrm_port)  # generation waits for exactly this session
+    time.sleep(180)
+    # Build 22000 had no Explorer tabs: open folders in their own windows, as the ShellBag scenario expects.
+    guest(winrm_port, "Set-ItemProperty HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"
+                      " -Name OpenFolderInNewTab -Type DWord -Value 0")
+    facts = json.loads(guest(winrm_port, FACTS)) | {"license": license_facts}
+    (work / "guest.json").write_text(json.dumps(facts, indent=2))
+    log(f"guest facts: {facts}")
+    log(base_script(winrm_port, "offline-base.ps1"))  # idempotent: it replaces its own rules
+    log("first-logon log:\n" + guest(winrm_port, "Get-Content C:\\fmd\\first-logon.log"))
+    state = json.loads(guest(winrm_port, SETUP_STATE))
+    log(f"setup and autologon: {state}")
+    if state != SETUP_DONE:
+        raise RuntimeError(f"Windows Setup is unfinished or autologon will not last: {state}")
+
+
+def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
+    """Boot an overlay of the finished disk as generation boots the base: the RTC at UTC minus the
+    frozen 480-minute bias, new MACs, a second NIC and no route out. WinRM must answer and vagrant
+    must log on by itself, or the base is not cached."""
+    subprocess.run([qemu_tool(qemu, "qemu-img"), "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", "win.qcow2",
+                    "verify.qcow2"], cwd=work, check=True)
+    shutil.copyfile(work / "vars.fd", work / "verify-vars.fd")
+    winrm_port, monitor_port = free_port(), free_port()
+    rtc = (datetime.now(timezone.utc) - timedelta(minutes=480)).strftime("%Y-%m-%dT%H:%M:%S")
+    command = [
+        str(qemu), "-machine", f"q35,accel={accelerator}", "-cpu", cpu, "-smp", "2", "-m", "4096",
+        "-rtc", f"base={rtc},clock=host",
+        "-drive", "if=pflash,format=raw,readonly=on,file=code.fd",
+        "-drive", "if=pflash,format=raw,file=verify-vars.fd",
+        "-drive", "id=disk,if=none,format=qcow2,file=verify.qcow2",
+        "-device", "ide-hd,drive=disk,bus=ide.0,bootindex=0",
+        "-device", "qemu-xhci,id=xhci,p2=8,p3=8",
+        "-netdev", f"user,id=nat,restrict=on,hostfwd=tcp:127.0.0.1:{winrm_port}-:5985",
+        "-device", "e1000e,netdev=nat,mac=00:50:56:00:fd:01",
+        "-netdev", "user,id=hostonly,restrict=on,net=192.168.56.0/24",
+        "-device", "e1000e,netdev=hostonly,mac=00:50:56:00:fd:02",
+        "-vga", "std", "-display", "none",
+        "-monitor", f"tcp:127.0.0.1:{monitor_port},server,nowait",
+        "-serial", "file:verify-serial.log",
+    ]
+    log(" ".join(command))
+    with (work / "qemu.log").open("a") as qemu_log:
+        vm = subprocess.Popen(command, cwd=work, stdout=qemu_log, stderr=subprocess.STDOUT)
+    try:
+        log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 1800, "verify"))
+        interactive(winrm_port)
+        state = json.loads(guest(winrm_port, SETUP_STATE))
+        log(f"verify: setup and autologon {state}")
+        if state != SETUP_DONE:
+            raise SystemExit(f"the base does not boot finished: {state}")
+    finally:
+        monitor(monitor_port, "screendump shots/verify-last.png -f png")
+        time.sleep(3)
+        vm.kill()
+        vm.wait()
+        (work / "verify.qcow2").unlink(missing_ok=True)
+        (work / "verify-vars.fd").unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--iso-url", required=True)
+    parser.add_argument("--work", type=Path, default=Path("win-work"))
+    parser.add_argument("--cpu", help="QEMU -cpu value; default hides VT-x/AMD-V from the guest")
+    parser.add_argument("--deadline-min", type=int, default=75)  # Setup, OOBE and first logon
+    args = parser.parse_args()
+
+    accelerator = ACCELERATORS[platform.system()]
+    cpu = args.cpu or ("max,-vmx,-svm" if accelerator == "whpx" else "host,-vmx,-svm")
+    qemu = qemu_binary()
+    code, variables = firmware(qemu)
+    work = args.work.resolve()
+    (work / "shots").mkdir(parents=True, exist_ok=True)
+    log(f"host {platform.system()} {platform.machine()} {platform.processor()}, accelerator {accelerator}, cpu {cpu}")
+    log(subprocess.run([str(qemu), "--version"], capture_output=True, text=True).stdout.splitlines()[0])
+
+    download(args.iso_url, work / "win.iso")
+    answer_iso(work / "answer.iso")
+    shutil.copyfile(code, work / "code.fd")
+    shutil.copyfile(variables, work / "vars.fd")
+    winrm_port, monitor_port = free_port(), free_port()
+
+    def start() -> subprocess.Popen:
+        """A fresh disk and firmware variables, the install media, and the keys that boot the ISO."""
+        shutil.copyfile(variables, work / "vars.fd")
+        (work / "win.qcow2").unlink(missing_ok=True)
+        subprocess.run([qemu_tool(qemu, "qemu-img"), "create", "-q", "-f", "qcow2", "win.qcow2", "64G"], cwd=work,
+                       check=True)
+        rtc = datetime.now(GUEST_ZONE).strftime("%Y-%m-%dT%H:%M:%S")
+        command = [
+            str(qemu), "-machine", f"q35,accel={accelerator}", "-cpu", cpu, "-smp", "2", "-m", "4096",
+            "-rtc", f"base={rtc}",
+            "-drive", "if=pflash,format=raw,readonly=on,file=code.fd",
+            "-drive", "if=pflash,format=raw,file=vars.fd",
+            "-drive", "id=disk,if=none,format=qcow2,file=win.qcow2,cache=unsafe",
+            "-device", "ide-hd,drive=disk,bus=ide.0,bootindex=0",
+            "-drive", "id=winiso,if=none,media=cdrom,readonly=on,file=win.iso",
+            "-device", "ide-cd,drive=winiso,bus=ide.1,bootindex=1",
+            "-drive", "id=answer,if=none,media=cdrom,readonly=on,file=answer.iso",
+            "-device", "ide-cd,drive=answer,bus=ide.2",
+            "-device", "qemu-xhci,id=xhci",  # present during Setup, as in the paper's base (USB 3 layout)
+            "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{winrm_port}-:5985",  # NAT, as the paper's build had
+            "-device", "e1000e,netdev=net0",
+            "-vga", "std", "-display", "none",
+            "-monitor", f"tcp:127.0.0.1:{monitor_port},server,nowait",
+            "-serial", "file:serial.log",
+        ]
+        log(" ".join(command))
+        SERIAL_SEEN[0], GUEST_SPOKE[0] = 0, False
+        with (work / "qemu.log").open("w") as qemu_log:
+            started = subprocess.Popen(command, cwd=work, stdout=qemu_log, stderr=subprocess.STDOUT)
+        time.sleep(2)
+        for _ in range(40):  # the Windows ISO waits for a key before booting from CD
+            monitor(monitor_port, "sendkey spc")
+            time.sleep(0.5)
+        return started
+
+    # Windows Setup can hang under nested KVM (one attempt spun at 39% for 40 minutes): a stalled
+    # install is started again on a fresh disk instead of burning the deadline.
+    for install_try in (1, 2):
+        vm = start()
+        booted = time.monotonic()
+        try:
+            log(wait_ready(vm, work, winrm_port, monitor_port, booted + args.deadline_min * 60, f"install{install_try}",
+                           stall_seconds=600))
+            break
+        except Stalled as stall:
+            vm.kill()
+            vm.wait()
+            if install_try == 2:
+                raise SystemExit(f"Windows Setup stalled twice: {stall}") from stall
+            log(f"install {install_try} stalled ({stall}); installing again on a fresh disk")
+        except BaseException:
+            vm.kill()
+            vm.wait()
+            raise
+    try:
+        log(f"windows ready {time.monotonic() - booted:.0f}s after boot")
+        # The expensive install is done; the steps after it are idempotent, so a failure there resets
+        # the guest and finishes again instead of throwing the install away.
+        for round_number in range(1, 4):
+            try:
+                finish(vm, work, winrm_port, monitor_port)
+                break
+            except Exception as error:
+                if round_number == 3:
+                    raise
+                log(f"finishing round {round_number} failed ({type(error).__name__}: {str(error)[:300]}); "
+                    "resetting the guest and finishing again")
+                monitor(monitor_port, "system_reset")
+                time.sleep(60)
+                log(wait_ready(vm, work, winrm_port, monitor_port, time.monotonic() + 1800, f"reset{round_number}"))
+        power(winrm_port, "/s")
+        vm.wait(timeout=300)
+    finally:
+        if vm.poll() is None:
+            vm.kill()
+            vm.wait()
+
+    (work / "win.iso").unlink()
+    verify(qemu, accelerator, cpu, work)
+    started = time.monotonic()
+    subprocess.run([qemu_tool(qemu, "qemu-img"), "convert", "-c", "-O", "qcow2", "-o", "compression_type=zstd",
+                    "win.qcow2", "base.qcow2"], cwd=work, check=True)
+    (work / "win.qcow2").unlink()
+    shutil.copyfile(work / "vars.fd", work / "base-vars.fd")
+    log(f"base: {(work / 'base.qcow2').stat().st_size / 2**30:.1f} GiB compressed in {time.monotonic() - started:.0f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

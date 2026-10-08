@@ -1,0 +1,97 @@
+import re
+import shutil
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from fmd.generation import backends, recipe
+from fmd.generation.backends import QemuBackend
+
+
+def test_the_qemu_vm_mirrors_the_frozen_vmware_definition(tmp_path, monkeypatch):
+    monkeypatch.setattr(QemuBackend, "accelerator", staticmethod(lambda: "kvm"))
+    backend = QemuBackend(pipeline=None)
+    backend.winrm_port, backend.monitor_port = 55985, 55986
+    hardware = recipe.resolved_hardware(2026091811)
+    inputs = {"fmd_hardware": hardware, "fmd_vmware_boot_clock_bias_minutes": 480}
+    media = [{"path": tmp_path / f"m{unit}.vmdk", "unit": unit, "port": port} for unit, port in ((8, 5), (9, 3), (10, 2))]
+    command = backend.command(Path("qemu-system-x86_64"), tmp_path, inputs, media)
+    text = " ".join(command)
+
+    assert command[command.index("-uuid") + 1] == hardware["uuid_bios"]
+    assert f"mac={hardware['base_mac']}" in text
+    assert command[command.index("-cpu") + 1].startswith("host,-vmx,-svm,")
+    assert "net=192.168.56.0/24" in text
+    assert command[command.index("-m") + 1] == "4096" and command[command.index("-smp") + 1] == "2"
+    serials = re.findall(r"usb-bot,id=usb(\d+)bot,bus=xhci\.0,port=(\d+),serial=([0-9A-F]+)", text)
+    assert [(int(port), int(unit)) for unit, port, _ in serials] == [(5, 8), (3, 9), (2, 10)]
+    assert all(f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}" in text
+               for unit, _, serial in serials)
+    assert all(len(serial) == 32 for *_, serial in serials) and len({serial for *_, serial in serials}) == 3
+    rtc = datetime.strptime(command[command.index("-rtc") + 1].split(",")[0].removeprefix("base="),
+                            "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    assert abs(rtc - (datetime.now(timezone.utc) - timedelta(minutes=480))) < timedelta(seconds=60)
+    assert "restrict=on" in text and "hostfwd=tcp:127.0.0.1:55985-:5985" in text
+
+
+@pytest.mark.skipif(shutil.which("qemu-img") is None, reason="qemu-img is not installed")
+def test_a_qemu_base_is_located_and_checked_like_a_box(tmp_path, monkeypatch):
+    monkeypatch.setenv(backends.QEMU_BASE_HOME_ENV, str(tmp_path))
+    directory = tmp_path / "fmd-VAGRANTSLASH-windows-11-x64" / "0" / "amd64" / "qemu"
+    directory.mkdir(parents=True)
+    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", str(directory / "base.qcow2"), "1M"], check=True)
+    (directory / "base-vars.fd").write_bytes(b"\0" * 16)
+
+    location = QemuBackend.base_location("fmd/windows-11-x64", "0")
+    assert location == {"kind": "qemu_base", "box": "fmd/windows-11-x64", "version": "0",
+                        "architecture": "amd64", "provider": "qemu"}
+    files = QemuBackend.base_files(QemuBackend.base_directory(location))
+    assert [path.name for path in files] == ["base-vars.fd", "base.qcow2"]
+    rows = [{"path": path.name} for path in files]
+    QemuBackend.check_base(directory, "base.qcow2", rows)
+
+    overlay = tmp_path / "overlay.qcow2"
+    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b",
+                    str(directory / "base.qcow2"), str(overlay)], check=True)
+    shutil.move(overlay, directory / "base.qcow2.overlay")
+    (directory / "base.qcow2").unlink()
+    shutil.move(directory / "base.qcow2.overlay", directory / "base.qcow2")
+    with pytest.raises(ValueError, match="standalone"):
+        QemuBackend.check_base(directory, "base.qcow2", rows)
+
+
+def test_the_qemu_paper_config_differs_from_the_paper_only_in_provider_and_box():
+    paper, qemu = recipe.paper_config("I1"), recipe.paper_config("I1", "qemu", "fmd/windows-11-x64")
+    assert {key for key in paper if paper[key] != qemu[key]} == {"provider", "windows_box"}
+    assert recipe.validate_paper_config(qemu) == "I1"
+    with pytest.raises(ValueError):
+        recipe.paper_config("I1", "virtualbox")
+
+
+def test_parsers_run_in_the_appliance_on_macos_natively_on_windows_and_in_qemu_elsewhere(monkeypatch):
+    from fmd.collection.tools.host import parser_appliance
+
+    for host, expected in (("darwin", ("vmware_desktop", "fmd/windows-11-arm64")),
+                           ("win32", ("native_windows", None)), ("linux", ("qemu", recipe.qemu_box()))):
+        monkeypatch.setattr(parser_appliance.sys, "platform", host)
+        assert parser_appliance.parser_runtime() == expected
+
+
+@pytest.mark.skipif(shutil.which("qemu-img") is None, reason="qemu-img is not installed")
+def test_the_windows_write_path_keeps_crlf_and_eof_bytes_and_the_neighbouring_sectors(tmp_path):
+    from fmd.generation.ntfs_surface_injection import _write_window
+    from fmd.generation.qemu_image import QemuImageReader
+
+    image = tmp_path / "disk.vmdk"
+    subprocess.run(["qemu-img", "create", "-q", "-f", "vmdk", str(image), "4M"], check=True)
+    reader = QemuImageReader(image)
+    _write_window(reader, 0, bytes(range(256)) * 16, tmp_path)
+    before = reader.read_at(0, 8192)
+    payload = b"line one\r\nline two\r\n\x1a\x00\xff end"
+    _write_window(reader, 1000, payload, tmp_path)
+
+    after = reader.read_at(0, 8192)
+    assert after[1000:1000 + len(payload)] == payload
+    assert after[:1000] == before[:1000] and after[1000 + len(payload):] == before[1000 + len(payload):]

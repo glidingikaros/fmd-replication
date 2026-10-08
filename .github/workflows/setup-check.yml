@@ -1,0 +1,20 @@
+name: Setup check
+
+# `fmd replicate setup` and `doctor` on Linux and Windows runners, without the Windows base:
+# what a user installs, checked whenever the replication code or the host leg changes.
+on:
+  push:
+    branches: [portability]
+    paths: [src/fmd/replication/**, ci/wsl-ansible/**, .github/workflows/host.yml, .github/workflows/setup-check.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    uses: ./.github/workflows/host.yml
+    with: {os: ubuntu-24.04, image: I1, stage: setup}
+  windows:
+    uses: ./.github/workflows/host.yml
+    with: {os: windows-2025, image: I1, stage: setup}

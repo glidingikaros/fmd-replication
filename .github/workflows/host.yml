@@ -1,0 +1,147 @@
+name: Host
+
+# One host leg of the replication, called by replicate.yml. It runs the same commands a user runs
+# (REPLICATE.md): `fmd replicate setup`, `doctor` and `run`. Stage "smoke" boots the shared base and
+# exercises the guest and parser paths (ci/smoke_guest.py) instead of running an image; stage
+# "setup" stops after `fmd replicate setup` and `doctor`, without the base.
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+      image:
+        type: string
+        required: true
+      stage:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: ${{ inputs.stage }} ${{ inputs.image }}
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      GH_TOKEN: ${{ github.token }}  # gh downloads the pinned EZ tools from this repo's release
+    steps:
+      - name: Line endings stay as committed (sources are sealed by hash)
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem -Name LongPathsEnabled -Value 1
+      - name: Work directory
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            # generation peaks near 45 GB (base, overlay, exported image); the image leaves ~30 GB free
+            sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost \
+              /usr/share/dotnet /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium \
+              /usr/local/lib/node_modules /opt/az /opt/microsoft /opt/google /usr/lib/jvm /opt/pipx /usr/share/miniconda
+            sudo docker image prune -af > /dev/null 2>&1 || true
+            sudo mkdir -p /mnt/fmd && sudo chown "$USER" /mnt/fmd
+            work=/mnt/fmd
+          else
+            work="$RUNNER_TEMP/fmd"
+            mkdir -p "$work"
+          fi
+          echo "WORK=$work" >> "$GITHUB_ENV"
+          echo "FMD_CACHE=$work/cache" >> "$GITHUB_ENV"
+          echo "FMD_QEMU_BASE_HOME=$work/cache/qemu-bases" >> "$GITHUB_ENV"
+          df -h
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.9.9"
+          python-version: "3.13.5"
+      - run: uv sync --locked --all-extras
+
+      # What REPLICATE.md asks a user to install by hand.
+      - name: QEMU
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf > /dev/null
+            sudo chmod 666 /dev/kvm
+          else
+            choco install qemu -y --no-progress | tail -2
+            echo 'C:\Program Files\qemu' >> "$GITHUB_PATH"
+          fi
+      - uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        if: runner.os == 'Windows'
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 1
+          additional-packages: python3-venv
+
+      - name: fmd replicate setup (tools; the base comes from the cache below)
+        run: |
+          uv run --no-sync fmd replicate setup --skip-base
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"  # Ansible for the smoke check, which runs outside fmd
+
+      # One base for every host, as the paper used one box: the Linux-installed base, restored on
+      # Windows too. The literal Linux paths reproduce the cache version; the archive holds
+      # workspace-relative paths (../../_temp/...), which land in the runner's temp on both OSes.
+      - name: Restore the Windows 11 x64 base
+        if: inputs.stage != 'setup'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: win11-x64-26300-linux-host-${{ hashFiles('ci/windows/install.py', 'ci/windows/autounattend.xml', 'ci/windows/scripts/**', 'tools/base-image/windows11-arm64/scripts/**') }}
+          # the newest base of this recipe line, when the install code changed without a rebuild
+          restore-keys: win11-x64-26300-linux-host-
+          path: |
+            /home/runner/work/_temp/win-work/base.qcow2
+            /home/runner/work/_temp/win-work/base-vars.fd
+            /home/runner/work/_temp/win-work/guest.json
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Place the base where fmd replicate setup would have built it
+        if: inputs.stage != 'setup'
+        run: |
+          box="$FMD_QEMU_BASE_HOME/fmd-VAGRANTSLASH-windows-11-x64/0"
+          mkdir -p "$box/amd64/qemu"
+          restored=$(dirname "$(ls "$RUNNER_TEMP/win-work/base.qcow2" /home/runner/work/_temp/win-work/base.qcow2 2>/dev/null | head -1)")
+          mv "$restored/base.qcow2" "$restored/base-vars.fd" "$box/amd64/qemu/"
+          mv "$restored/guest.json" "$box/guest.json"
+          cat "$box/guest.json"
+          echo "GUEST_WINDOWS_BUILD=$(uv run --no-sync python -c "import json,sys; print(json.load(open(sys.argv[1]))['build'])" "$box/guest.json")" >> "$GITHUB_ENV"
+          df -h
+      - name: fmd replicate doctor
+        continue-on-error: true  # a report; a real gap fails the steps that need it
+        run: uv run --no-sync fmd replicate doctor
+
+      - name: Smoke
+        if: inputs.stage == 'smoke'
+        run: uv run --no-sync python ci/smoke_guest.py --windows-build "$GUEST_WINDOWS_BUILD" --parsers "$FMD_CACHE/windows-parsers" --work "$WORK/smoke"
+      - name: fmd replicate run ${{ inputs.image }}
+        if: inputs.stage == 'full'
+        run: uv run --no-sync fmd replicate run ${{ inputs.image }} --output "$WORK/replication"
+
+      - name: Keep results and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.stage }}-${{ runner.os }}-${{ inputs.image }}
+          path: |
+            ${{ env.WORK }}/smoke/**/*.json
+            ${{ env.WORK }}/smoke/**/*.png
+            ${{ env.WORK }}/smoke/**/qemu.log
+            ${{ env.WORK }}/replication/summary.json
+            ${{ env.WORK }}/replication/*/*.log
+            ${{ env.WORK }}/replication/*/generation/**/*.png
+            ${{ env.WORK }}/replication/*/run/gates/*.json
+            ${{ env.WORK }}/replication/*/run/run-manifest.json
+          retention-days: 5
+          if-no-files-found: warn

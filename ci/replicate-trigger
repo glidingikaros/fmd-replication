@@ -1,0 +1,2 @@
+Replicate run on the cached base (win11-x64-26300); set hosts to run the smoke legs, then I1-I3
+hosts: none

@@ -1,0 +1,14 @@
+---
+- name: Measure the guest clock checkpoint ({{ fmd_clock_stage }})
+  fmd_clock:
+    policy: "{{ fmd_clock_policy }}"
+    stage: "{{ fmd_clock_stage }}"
+  register: fmd_clockpoint_result
+  changed_when: false
+
+- name: Emit host-only guest clock checkpoint ({{ fmd_clock_stage }})
+  ansible.builtin.debug:
+    msg:
+      - "GENERATION_CLOCKPOINT_BEGIN"
+      - "{{ fmd_clockpoint_result.stdout | trim }}"
+      - "GENERATION_CLOCKPOINT_END"

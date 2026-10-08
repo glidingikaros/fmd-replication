@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+.env
+.env.local
+.vagrant/
+.fmd/
+outputs/
+.DS_Store
+
+# Study records kept out of the public repository (the I1 run the paper replays)
+.attic/

@@ -1,0 +1,57 @@
+name: Replicate
+
+# The experiment on Linux and Windows hosts: per host, a smoke leg boots the shared base and
+# exercises the guest and parser paths; only if it passes do I1, I2 and I3 run in parallel
+# (generate, collect, deterministic analysis through admission). Push a change to
+# ci/replicate-trigger (it needs the cached base) or dispatch it to run.
+on:
+  push:
+    branches: [portability]
+    paths: [ci/replicate-trigger]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:  # `hosts: linux windows` in ci/replicate-trigger picks the hosts (default: both)
+    runs-on: ubuntu-24.04
+    outputs:
+      hosts: ${{ steps.read.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: ci/replicate-trigger
+          sparse-checkout-cone-mode: false
+      - id: read
+        run: |
+          hosts=$(sed -n 's/^hosts: *//p' ci/replicate-trigger | head -1)
+          echo "hosts=${hosts:-linux windows}" >> "$GITHUB_OUTPUT"
+          echo "hosts: ${hosts:-linux windows}"
+  smoke-linux:
+    needs: plan
+    if: contains(needs.plan.outputs.hosts, 'linux')
+    uses: ./.github/workflows/host.yml
+    with: {os: ubuntu-24.04, image: I1, stage: smoke}
+  smoke-windows:
+    needs: plan
+    if: contains(needs.plan.outputs.hosts, 'windows')
+    uses: ./.github/workflows/host.yml
+    with: {os: windows-2025, image: I1, stage: smoke}
+  linux:
+    needs: smoke-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [I1, I2, I3]
+    uses: ./.github/workflows/host.yml
+    with: {os: ubuntu-24.04, image: "${{ matrix.image }}", stage: full}
+  windows:
+    needs: smoke-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [I1, I2, I3]
+    uses: ./.github/workflows/host.yml
+    with: {os: windows-2025, image: "${{ matrix.image }}", stage: full}

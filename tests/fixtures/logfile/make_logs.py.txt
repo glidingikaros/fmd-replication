@@ -1,0 +1,61 @@
+from pathlib import Path
+import struct, json
+P=Path('/tmp/fmd-fable-rereview-logfile')
+PAGE=4096
+FTOLD=0x01DD42A5A32A12F8
+FTNEW=0x01CA8B1CFFC62000
+
+def protect(b, usa=40):
+    struct.pack_into('<HH',b,4,usa,9)
+    b[usa:usa+2]=b'\x77\x00'
+    for i in range(8):
+        tail=(i+1)*512-2
+        b[usa+2+i*2:usa+4+i*2]=b[tail:tail+2]
+        b[tail:tail+2]=b'\x77\x00'
+    return bytes(b)
+
+def client(op, undoop=None, redo=b'', undo=b'', entry=10, offset=80):
+    b=bytearray(40)
+    if undoop is None: undoop=op
+    struct.pack_into('<HHHHHHHHHHHHq',b,0,op,undoop,40 if redo else 0,len(redo),40+len(redo) if undo else 0,len(undo),0,1,56,offset-56 if offset else 0,(entry%4)*2,2,entry//4)
+    struct.pack_into('<q',b,32,50)
+    return bytes(b)+redo+undo
+
+def lsn(page): return (1<<44)+((page*PAGE+64)//8)
+
+def build(name, rows, corrupt_page=None):
+    rows=[(None, rows[0][1], 0, b'', b'', None), *rows]
+    last_by_client={}; pages=[]; inventory=[]
+    for i,(op,clientid,txid,redo,undo,undoop) in enumerate(rows,4):
+        if op is None:
+            data=bytearray(112);struct.pack_into('<II',data,0,2,0);struct.pack_into('<I',data,80,4096)
+        else:
+            if op == 2:
+                redo=(P/'current-record.bin').read_bytes()
+            data=client(op,undoop,redo,undo,offset=80 if op==7 else 0)
+        b=bytearray(PAGE); b[:4]=b'RCRD'
+        current=lsn(i)
+        struct.pack_into('<Q',b,8,current)
+        struct.pack_into('<IHHH',b,16,1,1,1,64+48+len(data))
+        struct.pack_into('<Q',b,32,current)
+        struct.pack_into('<QQQLLLLH',b,64,current,last_by_client.get(clientid,0),0,len(data),clientid,2 if op is None else 1,txid,0)
+        b[112:112+len(data)]=data
+        protected=bytearray(protect(b))
+        if i==corrupt_page: protected[510]^=1
+        pages.append(bytes(protected)); last_by_client[clientid]=current
+        inventory.append({'page':i,'lsn':current,'operation':op,'client_id':clientid,'txid':txid})
+    total=(4+len(rows))*PAGE
+    restart=bytearray(PAGE);restart[:4]=b'RSTR'
+    struct.pack_into('<QIIHHH',restart,8,0,PAGE,PAGE,80,1,1)
+    struct.pack_into('<QHHHHIHHqIHHI',restart,80,lsn(3+len(rows)),1,65535,0,0,20,224,64,total,40,48,64,1)
+    struct.pack_into('<QQHHH',restart,144,lsn(4),0,65535,65535,rows[-1][1]&65535)
+    struct.pack_into('<I',restart,172,8);restart[176:184]='NTFS'.encode('utf-16le')
+    first=protect(restart)
+    target=P/(name+'.$LogFile');target.write_bytes(first+first+bytes(PAGE*2)+b''.join(pages))
+    (P/(name+'-inventory.json')).write_text(json.dumps(inventory,indent=2)+'\n')
+
+redo=struct.pack('<QQQQ',FTNEW,FTNEW,FTOLD,FTNEW)
+undo=struct.pack('<QQQQ',FTOLD,FTOLD,FTOLD,FTOLD)
+build('lifecycle',[(7,1,24,redo,undo,None),(2,1,28,b'',b'',None),(27,1,24,b'',b'',0)])
+build('corrupt-lifecycle',[(7,1,24,redo,undo,None),(2,1,28,b'',b'',None),(27,1,24,b'',b'',0)],corrupt_page=6)
+build('client-collision',[(7,1,24,redo,undo,None),(27,2,24,b'',b'',0)])
