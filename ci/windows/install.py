@@ -55,10 +55,13 @@ PRODUCT = ("$p = Get-CimInstance SoftwareLicensingProduct -Filter "
 LICENSE = PRODUCT + ("ConvertTo-Json -Compress @{name = $p.Name; status = [int]$p.LicenseStatus;"
                      " grace_minutes = [int]$p.GracePeriodRemaining; evaluation_end = [string]$p.EvaluationEndDate}")
 ACTIVATE = PRODUCT + "Invoke-CimMethod -InputObject $p -MethodName Activate | Out-Null"
-# --edition pro: the paper's base edition and its generic volume licence key (no activation)
+# --edition pro: the paper's base edition and its generic volume licence key, never activated. The
+# consumer ISO holds retail images, which refuse a volume key in Setup: Setup takes the generic retail
+# Pro key, and after first logon slmgr installs the paper's key in its place (offline, no activation).
 PRO_IMAGE = ("<InstallFrom><MetaData wcm:action=\"add\"><Key>/IMAGE/NAME</Key><Value>Windows 11 Pro</Value>"
              "</MetaData></InstallFrom>")
-PRO_KEY = "<ProductKey><Key>W269N-WFGWX-YVC9B-4J6C9-T83GX</Key><WillShowUI>OnError</WillShowUI></ProductKey>"
+PRO_KEY = "<ProductKey><Key>VK7JG-NPHTM-C97JM-9MPGT-3V66T</Key><WillShowUI>OnError</WillShowUI></ProductKey>"
+PAPER_KEY = "W269N-WFGWX-YVC9B-4J6C9-T83GX"
 FACTS = ("$o = Get-CimInstance Win32_OperatingSystem; $v = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';"
          "ConvertTo-Json -Compress @{build = [string]$o.BuildNumber; ubr = [int]$v.UBR; display_version = [string]$v.DisplayVersion;"
          " timezone = (Get-TimeZone).Id; locale = (Get-Culture).Name; caption = $o.Caption}")
@@ -309,6 +312,8 @@ def base_script(winrm_port: int, name: str) -> str:
 def finish(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: int, edition: str) -> None:
     """After the install: activate, restart and settle as the paper's base build did, record the
     guest, and take it offline with the paper's offline-base.ps1."""
+    if edition == "pro":
+        log(guest(winrm_port, f"cscript //nologo C:\\Windows\\System32\\slmgr.vbs /ipk {PAPER_KEY}"))
     license_facts = activate(winrm_port) if edition == "eval" else json.loads(guest(winrm_port, LICENSE))
     log(f"licence: {license_facts}")
     # What the first logon left, then the paper's enable-autologon.ps1 once more (idempotent): no
