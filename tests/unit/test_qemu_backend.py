@@ -29,8 +29,8 @@ def test_the_qemu_vm_mirrors_the_frozen_vmware_definition(tmp_path, monkeypatch)
     assert command[command.index("-m") + 1] == "4096" and command[command.index("-smp") + 1] == "2"
     serials = re.findall(r"usb-bot,id=usb(\d+)bot,bus=xhci\.0,port=(\d+),serial=([0-9A-F]+)", plugged)
     assert [(int(port), int(unit)) for unit, port, _ in serials] == [(5, 8), (3, 9), (2, 10)]
-    assert all(f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}" in plugged
-               for unit, _, serial in serials)
+    assert all(f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]},removable=on" in plugged
+               for unit, _, serial in serials)  # removable media, as VMware's virtual USB storage reports
     for unit, *_ in serials:  # each usb-bot is attached only once its SCSI disk is in place
         lines = plugged.splitlines()
         assert (lines.index(f"qom-set /machine/peripheral/usb{unit}bot attached true")

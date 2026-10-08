@@ -418,11 +418,13 @@ class QemuBackend:
     def media_commands(self, hardware: dict, media: list[dict]) -> list[str]:
         """Monitor commands that plug the frozen virtual USB disks into the running guest, in order.
 
-        VMware connects its virtual USB disks once the VM is running, so Windows installs each as a newly
-        plugged device and SetupAPI records the install, which the USB scenario requires; QEMU disks
-        present at boot are configured without that record. A hot-plugged usb-bot stays detached until
-        its SCSI disk is in place and its 'attached' property is set (QEMU's documented sequence).
-        Windows takes the USBSTOR serial from the usb-bot; QEMU 9+ caps a SCSI serial at 20 characters.
+        As VMware's virtual USB storage, the disks report removable media and are connected once the VM
+        is running. Windows then installs a portable-device (WPD) node for each disk, and SetupAPI
+        records that install under the disk's USBSTOR identity, the record the USB scenario's helper
+        requires (the paper's guest logged SWD\\WPDBUSENUM\\_??_USBSTOR#Disk&Ven_VMware&...). A fixed
+        disk gets no such node. A hot-plugged usb-bot stays detached until its SCSI disk is in place
+        and its 'attached' property is set (QEMU's documented sequence). Windows takes the USBSTOR
+        serial from the usb-bot; QEMU 9+ caps a SCSI serial at 20 characters.
         """
         commands = []
         for row in media:
@@ -430,7 +432,8 @@ class QemuBackend:
             path = Path(row["path"]).resolve().as_posix().replace(",", ",,")
             commands += [f'drive_add 0 "if=none,id=usb{unit},format=vmdk,file={path}"',
                          f"device_add usb-bot,id=usb{unit}bot,bus=xhci.0,port={int(row['port'])},serial={serial}",
-                         f"device_add scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}",
+                         f"device_add scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]},"
+                         "removable=on",
                          f"qom-set /machine/peripheral/usb{unit}bot attached true"]
         return commands
 
