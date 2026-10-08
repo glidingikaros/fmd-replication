@@ -1,0 +1,72 @@
+name: Clock probe
+
+# How fast the guest clock runs against the host's under a few QEMU timer options, on the cached
+# Pro base booted as generation boots it. The generation's checkpoints allow 2 s between its one
+# clock sync and its last checkpoint, so drift must stay well under 1000 ppm.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {label: whpx-current, os: windows-2025, cpu: "max,-vmx,-svm", machine: q35, accel: ""}
+          - {label: whpx-no-hpet, os: windows-2025, cpu: "max,-vmx,-svm", machine: "q35,hpet=off", accel: ""}
+          - {label: whpx-userspace-irqchip, os: windows-2025, cpu: "max,-vmx,-svm", machine: q35, accel: ",kernel-irqchip=off"}
+          - {label: kvm-current, os: ubuntu-24.04, cpu: "host,-vmx,-svm,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time", machine: q35, accel: ""}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: QEMU
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf > /dev/null
+            sudo chmod 666 /dev/kvm
+          else
+            choco install qemu -y --no-progress | tail -2
+            echo 'C:\Program Files\qemu' >> "$GITHUB_PATH"
+          fi
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.9.9"
+          python-version: "3.13.5"
+      - name: Restore the Pro base
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: win11-x64-26300-pro-linux-host-probe
+          restore-keys: win11-x64-26300-pro-linux-host-
+          path: |
+            /home/runner/work/_temp/win-work/base.qcow2
+            /home/runner/work/_temp/win-work/base-vars.fd
+            /home/runner/work/_temp/win-work/guest.json
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Probe
+        run: |
+          base=$(dirname "$(ls "$RUNNER_TEMP/win-work/base.qcow2" /home/runner/work/_temp/win-work/base.qcow2 2>/dev/null | head -1)")
+          uv run --no-project --with pycdlib==1.14.0 --with pywinrm==0.5.0 --with psutil==7.1.0 --with tzdata \
+            python ci/windows/clock_probe.py --base "$base" --work "$RUNNER_TEMP/probe" --cpu "${{ matrix.cpu }}" \
+            --machine "${{ matrix.machine }}" --accel-options "${{ matrix.accel }}" --label "${{ matrix.label }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: clock-probe-${{ matrix.label }}
+          path: |
+            ${{ runner.temp }}/probe/clock-probe.json
+            ${{ runner.temp }}/probe/probe.png
+            ${{ runner.temp }}/probe/qemu.log
+          retention-days: 5
+          if-no-files-found: warn
