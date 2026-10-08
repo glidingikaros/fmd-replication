@@ -49,7 +49,13 @@ $pilotDiskIndex = 0
 $scenarioInput = [pscustomobject]@{before_name = 'before.txt'; after_name = 'after.txt'; file_name = 'probe.bin'; shortcut_name = 'probe.lnk'; companion_file = 'probe.vmdk'}
 try { $binding = & { HELPER }; $helper = 'ok: ' + ($binding | ConvertTo-Json -Compress -Depth 4) }
 catch { $helper = 'failed: ' + $_.Exception.Message + ' (line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.InvocationInfo.Line.Trim() + ')' }
-[ordered]@{helper = $helper; disk_drives = $disks; disks = $volumes; setupapi_usb = $setup}"""
+$log = Get-Item C:\\Windows\\INF\\setupapi.dev.log
+$headers = @(Select-String -Path $log.FullName -Pattern '^>>>  \\[' | ForEach-Object { $_.Line.Trim() })
+$usbstor = @(Select-String -Path $log.FullName -Pattern 'USBSTOR' | Select-Object -First 8 | ForEach-Object { $_.Line.Trim() })
+$level = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup' -ErrorAction SilentlyContinue).LogLevel
+[ordered]@{helper = $helper; disk_drives = $disks; disks = $volumes; setupapi_usb = $setup;
+  setupapi = [ordered]@{bytes = $log.Length; written = $log.LastWriteTimeUtc.ToString('o'); headers = $headers.Count;
+  last_headers = @($headers | Select-Object -Last 12); usbstor_lines = $usbstor; log_level = $level}} | ConvertTo-Json -Depth 6 -Compress"""
 PLAYBOOK = """- hosts: all
   gather_facts: false
   tasks:
@@ -119,7 +125,7 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
     backend = QemuBackend(pipeline=None)
     backend.winrm_port, backend.monitor_port = _free_port(), _free_port()
     inputs = {"fmd_hardware": recipe.resolved_hardware(20261008), "fmd_vmware_boot_clock_bias_minutes": 480}
-    command = backend.command(qemu, state, inputs, media)
+    command = backend.command(qemu, state, inputs)
     log(" ".join(command))
     with (state / "qemu.log").open("w") as qemu_log:
         process = subprocess.Popen(command, stdout=qemu_log, stderr=subprocess.STDOUT)
@@ -168,6 +174,13 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
             except subprocess.TimeoutExpired:
                 pass
             time.sleep(15)
+        # as generation does: the virtual USB disks are plugged in once vagrant's desktop is up
+        def plug_media():
+            backend.attach_media(inputs["fmd_hardware"], media)
+            backend.await_media(ansible, len(media))
+            return round(time.monotonic() - started)
+
+        probe(report, "media_plugged_seconds", plug_media)
         probe(report, "clock_offset_start", lambda: clock_offset(ansible, backend.winrm_port))
 
         def facts():
@@ -193,7 +206,7 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
                       / "files" / "pilot_media_prepare.ps1").read_text(encoding="utf-8")
             result = ansible_adhoc(ansible, backend.winrm_port, "ansible.windows.win_powershell",
                                    {"script": USB_PROBE.replace("HELPER", helper)}, timeout=600)
-            return result_json(result.stdout)["output"][0] if result.returncode == 0 else result.stdout[-2500:]
+            return json.loads(result_json(result.stdout)["output"][0]) if result.returncode == 0 else result.stdout[-2500:]
 
         probe(report, "usb_media", usb_media)
         log(f"usb media: {json.dumps(report.get('usb_media'), default=str)[:3000]}")

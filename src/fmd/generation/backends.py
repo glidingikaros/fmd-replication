@@ -400,7 +400,8 @@ class QemuBackend:
                 return code_path, vars_path
         raise FileNotFoundError("no x86_64 UEFI firmware next to QEMU or in /usr/share/OVMF")
 
-    def _monitor(self, command: str) -> None:
+    def _monitor(self, command: str) -> str:
+        """Run one monitor command; returns what the monitor printed back."""
         import socket
         import time
 
@@ -408,6 +409,59 @@ class QemuBackend:
             connection.recv(4096)
             connection.sendall(command.encode() + b"\n")
             time.sleep(0.5)
+            connection.settimeout(2)
+            try:
+                return connection.recv(65536).decode(errors="replace")
+            except OSError:
+                return ""
+
+    def media_commands(self, hardware: dict, media: list[dict]) -> list[str]:
+        """Monitor commands that plug the frozen virtual USB disks into the running guest, in order.
+
+        VMware connects its virtual USB disks once the VM is running, so Windows installs each as a newly
+        plugged device and SetupAPI records the install, which the USB scenario requires; QEMU disks
+        present at boot are configured without that record. A hot-plugged usb-bot stays detached until
+        its SCSI disk is in place and its 'attached' property is set (QEMU's documented sequence).
+        Windows takes the USBSTOR serial from the usb-bot; QEMU 9+ caps a SCSI serial at 20 characters.
+        """
+        commands = []
+        for row in media:
+            unit, serial = int(row["unit"]), self.usb_serial(hardware, unit=int(row["unit"]))
+            path = Path(row["path"]).resolve().as_posix().replace(",", ",,")
+            commands += [f'drive_add 0 "if=none,id=usb{unit},format=vmdk,file={path}"',
+                         f"device_add usb-bot,id=usb{unit}bot,bus=xhci.0,port={int(row['port'])},serial={serial}",
+                         f"device_add scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}",
+                         f"qom-set /machine/peripheral/usb{unit}bot attached true"]
+        return commands
+
+    def attach_media(self, hardware: dict, media: list[dict]) -> None:
+        import time
+
+        for command in self.media_commands(hardware, media):
+            reply = self._monitor(command).replace(command, "").lower()  # the monitor echoes the command
+            if any(word in reply for word in ("error", "could not", "failed", "invalid", "not found", "unknown")):
+                raise RuntimeError(f"QEMU refused {command!r}: {reply.strip()[:500]}")
+            time.sleep(5 if command.startswith("qom-set") else 1)  # one plug-in at a time, as by hand
+
+    def await_media(self, ansible: str, count: int, timeout: int = 300) -> None:
+        """Wait until Windows has installed the plugged disks as USBSTOR disk drives."""
+        import subprocess
+        import time
+
+        script = ("$n = @(Get-CimInstance Win32_DiskDrive | Where-Object { $_.PNPDeviceID -like 'USBSTOR\\*' }).Count;"
+                  f" if ($n -lt {count}) {{ throw \"$n of {count} USB disks installed\" }}")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if ansible_adhoc(ansible, self.winrm_port, "ansible.windows.win_powershell", {"script": script},
+                                 timeout=150).returncode == 0:
+                    time.sleep(15)  # let SetupAPI finish the install records
+                    return
+            except subprocess.TimeoutExpired:
+                pass
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Windows did not install the {count} plugged virtual USB disks")
+            time.sleep(10)
 
     def _guest_powershell(self, script: str, timeout: int = 180):
         """Run one PowerShell script in the guest through Ansible's encrypted WinRM connection."""
@@ -420,7 +474,7 @@ class QemuBackend:
 
         return hashlib.sha256(f"fmd-qemu-usb.v1:{hardware['uuid_bios']}:{unit}".encode()).hexdigest()[:32].upper()
 
-    def command(self, qemu: Path, state: Path, inputs: dict, media: list[dict]) -> list[str]:
+    def command(self, qemu: Path, state: Path, inputs: dict) -> list[str]:
         from datetime import datetime, timedelta, timezone
 
         hardware = inputs["fmd_hardware"]
@@ -430,15 +484,8 @@ class QemuBackend:
         second_mac = mac[:-2] + f"{(int(mac[-2:], 16) + 1) % 256:02X}"
         command = qemu_guest_command(qemu, state, winrm_port=self.winrm_port, monitor_port=self.monitor_port)
         command[1:1] = ["-name", hardware["display_name"], "-uuid", hardware["uuid_bios"]]
+        # the virtual USB disks are plugged in once Windows runs (media_commands)
         command += ["-rtc", f"base={rtc},clock=host", "-device", "qemu-xhci,id=xhci,p2=8,p3=8"]
-        for row in media:
-            unit, serial = int(row["unit"]), self.usb_serial(hardware, unit=int(row["unit"]))
-            # A USB mass-storage disk as usb-bot plus its SCSI disk: Windows takes the USBSTOR serial from
-            # the USB device, and QEMU 9+ refuses a usb-storage serial over 20 characters because it also
-            # becomes the SCSI device id.
-            command += ["-drive", f"id=usb{unit},if=none,format=vmdk,file={row['path']}",
-                        "-device", f"usb-bot,id=usb{unit}bot,bus=xhci.0,port={int(row['port'])},serial={serial}",
-                        "-device", f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}"]
         command += [
             "-netdev", f"user,id=nat,restrict=on,hostfwd=tcp:127.0.0.1:{self.winrm_port}-:5985",
             "-device", f"e1000e,netdev=nat,mac={mac}",
@@ -467,7 +514,7 @@ class QemuBackend:
                 != [(item["unit"], item["port"], item["source_file"]) for item in frozen]):
             raise ValueError("pilot USB layout differs from its frozen recipe")
         self.winrm_port, self.monitor_port = _free_port(), _free_port()
-        command = self.command(qemu, state, inputs, media)
+        command = self.command(qemu, state, inputs)
         log = (state / "qemu.log").open("w")
         self.process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         log.close()
@@ -480,8 +527,11 @@ class QemuBackend:
                 raise RuntimeError("QEMU exited during boot: " + (state / "qemu.log").read_text(errors="replace")[-2000:])
             try:
                 if self._guest_powershell(wait, timeout=120).returncode == 0:
+                    self.attach_media(inputs["fmd_hardware"], media)
+                    self.await_media(p.ansible_cmd, len(media))
                     return (f"[*] QEMU guest ready after {time.monotonic() - started:.0f}s "
-                            f"(WinRM 127.0.0.1:{self.winrm_port}, interactive vagrant session)\n")
+                            f"(WinRM 127.0.0.1:{self.winrm_port}, interactive vagrant session, "
+                            f"{len(media)} virtual USB disks plugged in)\n")
             except subprocess.TimeoutExpired:
                 pass
             time.sleep(15)

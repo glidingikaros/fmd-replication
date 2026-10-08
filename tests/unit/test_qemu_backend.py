@@ -17,18 +17,24 @@ def test_the_qemu_vm_mirrors_the_frozen_vmware_definition(tmp_path, monkeypatch)
     hardware = recipe.resolved_hardware(2026091811)
     inputs = {"fmd_hardware": hardware, "fmd_vmware_boot_clock_bias_minutes": 480}
     media = [{"path": tmp_path / f"m{unit}.vmdk", "unit": unit, "port": port} for unit, port in ((8, 5), (9, 3), (10, 2))]
-    command = backend.command(Path("qemu-system-x86_64"), tmp_path, inputs, media)
+    command = backend.command(Path("qemu-system-x86_64"), tmp_path, inputs)
     text = " ".join(command)
+    assert "usb-bot" not in text and "qemu-xhci,id=xhci,p2=8,p3=8" in text  # disks are plugged in after boot
+    plugged = "\n".join(backend.media_commands(hardware, media))
 
     assert command[command.index("-uuid") + 1] == hardware["uuid_bios"]
     assert f"mac={hardware['base_mac']}" in text
     assert command[command.index("-cpu") + 1].startswith("host,-vmx,-svm,")
     assert "net=192.168.56.0/24" in text
     assert command[command.index("-m") + 1] == "4096" and command[command.index("-smp") + 1] == "2"
-    serials = re.findall(r"usb-bot,id=usb(\d+)bot,bus=xhci\.0,port=(\d+),serial=([0-9A-F]+)", text)
+    serials = re.findall(r"usb-bot,id=usb(\d+)bot,bus=xhci\.0,port=(\d+),serial=([0-9A-F]+)", plugged)
     assert [(int(port), int(unit)) for unit, port, _ in serials] == [(5, 8), (3, 9), (2, 10)]
-    assert all(f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}" in text
+    assert all(f"scsi-hd,bus=usb{unit}bot.0,scsi-id=0,lun=0,drive=usb{unit},serial={serial[:20]}" in plugged
                for unit, _, serial in serials)
+    for unit, *_ in serials:  # each usb-bot is attached only once its SCSI disk is in place
+        lines = plugged.splitlines()
+        assert (lines.index(f"qom-set /machine/peripheral/usb{unit}bot attached true")
+                > next(i for i, line in enumerate(lines) if line.startswith(f"device_add scsi-hd,bus=usb{unit}bot.0")))
     assert all(len(serial) == 32 for *_, serial in serials) and len({serial for *_, serial in serials}) == 3
     rtc = datetime.strptime(command[command.index("-rtc") + 1].split(",")[0].removeprefix("base="),
                             "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
