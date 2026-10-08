@@ -40,6 +40,16 @@ FACTS = ("$o = Get-CimInstance Win32_OperatingSystem;"
          " prefetcher = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters').EnablePrefetcher;"
          " folder_tabs = (Get-ItemProperty HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced).OpenFolderInNewTab}")
 CLOCK = "(Get-Date).ToUniversalTime().ToString('o')"
+# The USB scenario's own helper on the first virtual USB disk, with what Windows reports about the disks
+# and the SetupAPI install sections the helper requires; the scenario hides its output (no_log).
+USB_PROBE = """$disks = @(Get-CimInstance Win32_DiskDrive | ForEach-Object { [ordered]@{index = $_.Index; pnp = $_.PNPDeviceID; size = [UInt64]$_.Size; model = $_.Model} })
+$volumes = @(Get-Disk | ForEach-Object { [ordered]@{number = $_.Number; bus = [string]$_.BusType; size = [UInt64]$_.Size; style = [string]$_.PartitionStyle; offline = $_.IsOffline; readonly = $_.IsReadOnly; name = $_.FriendlyName} })
+$setup = @(Select-String -Path C:\\Windows\\INF\\setupapi.dev.log -Pattern 'Device Install \\(Hardware initiated\\) - ' | ForEach-Object { $_.Line.Trim() } | Where-Object { $_ -match 'USB' })
+$pilotDiskIndex = 0
+$scenarioInput = [pscustomobject]@{before_name = 'before.txt'; after_name = 'after.txt'; file_name = 'probe.bin'; shortcut_name = 'probe.lnk'; companion_file = 'probe.vmdk'}
+try { $binding = & { HELPER }; $helper = 'ok: ' + ($binding | ConvertTo-Json -Compress -Depth 4) }
+catch { $helper = 'failed: ' + $_.Exception.Message + ' (line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.InvocationInfo.Line.Trim() + ')' }
+[ordered]@{helper = $helper; disk_drives = $disks; disks = $volumes; setupapi_usb = $setup}"""
 PLAYBOOK = """- hosts: all
   gather_facts: false
   tasks:
@@ -178,6 +188,16 @@ def boot_and_check(box: str, expected: dict, work: Path) -> dict:
         report["base_ready"] = (licence_ok and guest_facts.get("eventlogs_compressed") is False
                                 and isinstance(guest_facts.get("where_year"), int) and guest_facts["where_year"] < 2026)
 
+        def usb_media():
+            helper = (Path(parser_appliance.__file__).parents[3] / "generation" / "ansible" / "roles" / "manipulation"
+                      / "files" / "pilot_media_prepare.ps1").read_text(encoding="utf-8")
+            result = ansible_adhoc(ansible, backend.winrm_port, "ansible.windows.win_powershell",
+                                   {"script": USB_PROBE.replace("HELPER", helper)}, timeout=600)
+            return result_json(result.stdout)["output"][0] if result.returncode == 0 else result.stdout[-2500:]
+
+        probe(report, "usb_media", usb_media)
+        log(f"usb media: {json.dumps(report.get('usb_media'), default=str)[:3000]}")
+
         checkpoint = work / "checkpoint dir"  # a space, as host paths may have
         checkpoint.mkdir()
         (work / "playbook.yml").write_text(PLAYBOOK, encoding="utf-8")
@@ -264,7 +284,9 @@ def main() -> int:
     keep()
     print(json.dumps(report, indent=2, default=str))
     guest, parsers = report.get("guest", {}), report.get("parsers", {})
+    usb_helper = str((guest.get("usb_media") or {}).get("helper", "")) if isinstance(guest.get("usb_media"), dict) else ""
     passed = ("console_diagnostic" not in guest and guest.get("facts_match") and guest.get("base_ready")
+              and usb_helper.startswith("ok:")
               and "desktop_seconds" in guest
               and guest.get("extra_vars_fetch") is True and guest.get("qemu_exit") == 0
               and parsers.get("exit") == 0 and parsers.get("pecmd_banner"))

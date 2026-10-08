@@ -1,0 +1,27 @@
+name: Smoke
+
+# The smoke legs alone (ci/smoke_guest.py on the cached base), dispatched without running the images.
+on:
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "linux, windows or both"
+        type: string
+        default: "linux windows"
+      base:
+        description: "pro or eval"
+        type: string
+        default: pro
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    if: contains(inputs.hosts, 'linux')
+    uses: ./.github/workflows/host.yml
+    with: {os: ubuntu-24.04, image: I1, stage: smoke, base: "${{ inputs.base }}"}
+  windows:
+    if: contains(inputs.hosts, 'windows')
+    uses: ./.github/workflows/host.yml
+    with: {os: windows-2025, image: I1, stage: smoke, base: "${{ inputs.base }}"}
