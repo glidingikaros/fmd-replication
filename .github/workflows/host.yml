@@ -16,6 +16,9 @@ on:
       stage:
         type: string
         required: true
+      base:  # pro: Windows 11 Pro on the paper's generic key; eval: the activated Enterprise Evaluation
+        type: string
+        default: pro
 
 permissions:
   contents: read
@@ -94,16 +97,14 @@ jobs:
       # One base for every host, as the paper used one box: the Linux-installed base, restored on
       # Windows too. The literal Linux paths reproduce the cache version; the archive holds
       # workspace-relative paths (../../_temp/...), which land in the runner's temp on both OSes.
-      # A Pro base (the paper's edition and generic key) is preferred to an Enterprise Evaluation one.
+      # inputs.base picks the Pro base (the paper's edition and generic key) or the Enterprise Evaluation one.
       - name: Restore the Windows 11 x64 base
         if: inputs.stage != 'setup'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: win11-x64-26300-pro-linux-host-${{ hashFiles('ci/windows/install.py', 'ci/windows/autounattend.xml', 'ci/windows/scripts/**', 'tools/base-image/windows11-arm64/scripts/**') }}
+          key: win11-x64-26300-${{ inputs.base == 'pro' && 'pro-' || '' }}linux-host-${{ hashFiles('ci/windows/install.py', 'ci/windows/autounattend.xml', 'ci/windows/scripts/**', 'tools/base-image/windows11-arm64/scripts/**') }}
           # the newest base of this recipe line, when the install code changed without a rebuild
-          restore-keys: |
-            win11-x64-26300-pro-linux-host-
-            win11-x64-26300-linux-host-
+          restore-keys: win11-x64-26300-${{ inputs.base == 'pro' && 'pro-' || '' }}linux-host-
           path: |
             /home/runner/work/_temp/win-work/base.qcow2
             /home/runner/work/_temp/win-work/base-vars.fd

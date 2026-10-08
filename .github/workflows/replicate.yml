@@ -14,10 +14,11 @@ permissions:
   contents: read
 
 jobs:
-  plan:  # `hosts: linux windows` in ci/replicate-trigger picks the hosts (default: both)
+  plan:  # in ci/replicate-trigger, `hosts: linux windows` picks the hosts and `base: pro|eval` the base
     runs-on: ubuntu-24.04
     outputs:
       hosts: ${{ steps.read.outputs.hosts }}
+      base: ${{ steps.read.outputs.base }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -27,31 +28,33 @@ jobs:
       - id: read
         run: |
           hosts=$(sed -n 's/^hosts: *//p' ci/replicate-trigger | head -1)
+          base=$(sed -n 's/^base: *//p' ci/replicate-trigger | head -1)
           echo "hosts=${hosts:-linux windows}" >> "$GITHUB_OUTPUT"
-          echo "hosts: ${hosts:-linux windows}"
+          echo "base=${base:-pro}" >> "$GITHUB_OUTPUT"
+          echo "hosts: ${hosts:-linux windows}; base: ${base:-pro}"
   smoke-linux:
     needs: plan
     if: contains(needs.plan.outputs.hosts, 'linux')
     uses: ./.github/workflows/host.yml
-    with: {os: ubuntu-24.04, image: I1, stage: smoke}
+    with: {os: ubuntu-24.04, image: I1, stage: smoke, base: "${{ needs.plan.outputs.base }}"}
   smoke-windows:
     needs: plan
     if: contains(needs.plan.outputs.hosts, 'windows')
     uses: ./.github/workflows/host.yml
-    with: {os: windows-2025, image: I1, stage: smoke}
+    with: {os: windows-2025, image: I1, stage: smoke, base: "${{ needs.plan.outputs.base }}"}
   linux:
-    needs: smoke-linux
+    needs: [plan, smoke-linux]
     strategy:
       fail-fast: false
       matrix:
         image: [I1, I2, I3]
     uses: ./.github/workflows/host.yml
-    with: {os: ubuntu-24.04, image: "${{ matrix.image }}", stage: full}
+    with: {os: ubuntu-24.04, image: "${{ matrix.image }}", stage: full, base: "${{ needs.plan.outputs.base }}"}
   windows:
-    needs: smoke-windows
+    needs: [plan, smoke-windows]
     strategy:
       fail-fast: false
       matrix:
         image: [I1, I2, I3]
     uses: ./.github/workflows/host.yml
-    with: {os: windows-2025, image: "${{ matrix.image }}", stage: full}
+    with: {os: windows-2025, image: "${{ matrix.image }}", stage: full, base: "${{ needs.plan.outputs.base }}"}
