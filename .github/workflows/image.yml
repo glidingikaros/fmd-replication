@@ -1,0 +1,31 @@
+name: Image
+
+# One paper image on one host (fmd replicate run <image>), e.g. to repeat a job that failed for a
+# reason outside the experiment.
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        type: choice
+        options: [linux, windows]
+        default: windows
+      image:
+        type: choice
+        options: [I1, I2, I3]
+        default: I1
+      base:
+        description: "pro or eval"
+        type: string
+        default: pro
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    uses: ./.github/workflows/host.yml
+    with:
+      os: "${{ inputs.host == 'linux' && 'ubuntu-24.04' || 'windows-2025' }}"
+      image: "${{ inputs.image }}"
+      stage: full
+      base: "${{ inputs.base }}"

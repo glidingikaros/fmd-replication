@@ -80,7 +80,13 @@ jobs:
             sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf > /dev/null
             sudo chmod 666 /dev/kvm
           else
-            choco install qemu -y --no-progress | tail -2
+            # Chocolatey has returned success without installing QEMU; check the binary, retry, show why
+            for attempt in 1 2 3; do
+              choco install qemu -y --no-progress > "$RUNNER_TEMP/choco-qemu.log" 2>&1 || true
+              [ -f "/c/Program Files/qemu/qemu-system-x86_64.exe" ] && break
+              echo "QEMU missing after attempt $attempt:"; tail -25 "$RUNNER_TEMP/choco-qemu.log"; sleep 30
+            done
+            test -f "/c/Program Files/qemu/qemu-system-x86_64.exe"
             echo 'C:\Program Files\qemu' >> "$GITHUB_PATH"
           fi
       - uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
