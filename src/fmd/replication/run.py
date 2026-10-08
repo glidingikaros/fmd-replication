@@ -8,7 +8,10 @@ import json
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fmd.replication import host
 from fmd.replication.setup import log, windows_parsers
@@ -54,6 +57,32 @@ def dependency_lock(output: Path) -> Path:
     return lock
 
 
+def base_clock_wait_seconds(finished_utc: str, bias_minutes: int, now: datetime) -> float:
+    """Seconds until a generation guest's boot clock is past the base build's last logged events.
+
+    Generation boots the guest at UTC minus the recipe's frozen boot clock bias (480 minutes); the base
+    is built on real Pacific time, which in summer time runs an hour ahead of that. A generation booted
+    within that hour logs SetupAPI sections earlier than the base's last ones, and a SetupAPI window
+    whose section times run backwards is not established, which leaves the USB question indeterminate.
+    """
+    finished = datetime.fromisoformat(finished_utc)
+    pacific = finished.astimezone(ZoneInfo("America/Los_Angeles")).utcoffset() or timedelta(0)
+    ready = finished + max(timedelta(minutes=bias_minutes) + pacific, timedelta(0)) + timedelta(minutes=10)
+    return max(0.0, (ready - now).total_seconds())
+
+
+def await_base_clock(recipe: Path) -> None:
+    facts = host.base_guest_facts() or {}
+    if host.provider() != "qemu" or "finished_utc" not in facts:
+        return
+    bias = json.loads((recipe / "recipe.json").read_text(encoding="utf-8"))["config"].get("vmware_boot_clock_bias_minutes", 0)
+    wait = base_clock_wait_seconds(facts["finished_utc"], int(bias), datetime.now(timezone.utc))
+    if wait:
+        log(f"waiting {wait / 60:.0f} minutes: the generation clock (UTC minus {bias} minutes) must start after "
+            "the base build's last logged events")
+        time.sleep(wait)
+
+
 def completed(root: Path) -> Path | None:
     """A generation the pipeline published: its manifest is written last, beside the image."""
     return next((manifest.parent for manifest in sorted(root.glob("**/manifest.json"))
@@ -67,6 +96,7 @@ def generate(image: str, lock: Path, folder: Path, attempts: int) -> Path:
         if fmd("paper", "generate", "--paper-image", image, *provider, "--dependency-lock", lock,
                "--freeze-recipe", recipe) != 0:
             raise SystemExit(f"{image}: freezing the recipe failed")
+    await_base_clock(recipe)
     for attempt in range(1, attempts + 1):
         if (done := completed(folder / "generation")) is not None:
             return done

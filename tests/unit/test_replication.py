@@ -81,3 +81,18 @@ def test_a_console_script_in_a_long_environment_path_hashes_like_a_short_one(tmp
         b"#!/bin/sh\n'''exec' '" + str(long / "bin" / "python").encode() + b"' \"$0\" \"$@\"\n' '''\n" + body)
     hashes = {portable_console_sha256(root / "bin" / "ntfs_parser", root / "bin" / "python") for root in (short, long)}
     assert len(hashes) == 1 and None not in hashes
+
+
+def test_generation_waits_until_its_biased_clock_is_past_the_base_builds_last_events():
+    from datetime import datetime, timezone
+
+    from fmd.replication.run import base_clock_wait_seconds
+
+    # summer time: the base logged on Pacific time (UTC-7), generation boots at UTC minus 480 minutes
+    assert base_clock_wait_seconds("2026-10-08T20:06:00+00:00", 480,
+                                   datetime(2026, 10, 8, 20, 30, tzinfo=timezone.utc)) == 46 * 60
+    # winter time: Pacific is UTC-8, the same as the bias; only the margin remains
+    assert base_clock_wait_seconds("2026-12-08T20:06:00+00:00", 480,
+                                   datetime(2026, 12, 8, 20, 10, tzinfo=timezone.utc)) == 6 * 60
+    assert base_clock_wait_seconds("2026-10-08T18:00:00+00:00", 480,
+                                   datetime(2026, 10, 8, 20, 30, tzinfo=timezone.utc)) == 0

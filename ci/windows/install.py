@@ -515,6 +515,11 @@ def main() -> int:
         if vm.poll() is None:
             vm.kill()
             vm.wait()
+    # The guest logged its last events on Pacific time; generation must boot its clock past them
+    # (fmd.replication.run.await_base_clock).
+    facts = json.loads((work / "guest.json").read_text())
+    facts.update(finished_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"), clock_zone=str(GUEST_ZONE))
+    (work / "guest.json").write_text(json.dumps(facts, indent=2))
 
     if iso == work / "win.iso":  # downloaded here; a file the user gave stays
         iso.unlink()
