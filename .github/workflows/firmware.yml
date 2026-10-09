@@ -39,7 +39,7 @@ jobs:
       - name: What doctor names for this distribution, and the firmware files present
         run: |
           python3 -c "import sys; sys.path.insert(0, 'src'); from fmd.replication.host import qemu_install; print('doctor:', qemu_install())"
-          command -v qemu-system-x86_64 qemu-img qemu-io
+          for tool in qemu-system-x86_64 qemu-img qemu-io; do command -v "$tool" || exit 1; done
           find / -xdev \( -iname '*ovmf*' -o -iname 'edk2-*' \) \( -iname '*.fd' -o -iname '*.bin' -o -iname '*.qcow2' \) 2>/dev/null | sort
       - name: The firmware fmd finds boots
         shell: python3 {0}

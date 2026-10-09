@@ -37,7 +37,7 @@ Then, depending on the host:
 sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf
 ```
 
-On Fedora, `sudo dnf install qemu-system-x86-core qemu-img edk2-ovmf`; on Arch, `sudo pacman -S qemu-system-x86 qemu-img edk2-ovmf`.
+On Fedora, `sudo dnf install qemu-system-x86-core qemu-img edk2-ovmf`; on Arch, `sudo pacman -S qemu-system-x86 qemu-img edk2-ovmf`; on openSUSE, `sudo zypper install qemu-x86 qemu-tools qemu-ovmf-x86_64`.
 Your user needs read-write access to `/dev/kvm`. If it doesn't have it, run `sudo usermod -aG kvm $USER` and log in again.
 
 **Windows** (an administrator PowerShell, then one reboot)

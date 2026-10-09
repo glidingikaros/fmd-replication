@@ -20,6 +20,7 @@ LINUX_QEMU = {  # /etc/os-release ID or ID_LIKE: the packages REPLICATE.md names
     "debian": "sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf",
     "fedora": "sudo dnf install qemu-system-x86-core qemu-img edk2-ovmf",
     "arch": "sudo pacman -S qemu-system-x86 qemu-img edk2-ovmf",
+    "suse": "sudo zypper install qemu-x86 qemu-tools qemu-ovmf-x86_64",
 }
 LONG_PATHS = ("admin PowerShell: New-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem "
               "-Name LongPathsEnabled -Value 1 -PropertyType DWord -Force")

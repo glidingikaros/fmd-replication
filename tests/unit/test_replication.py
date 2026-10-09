@@ -151,6 +151,7 @@ def test_doctor_names_the_qemu_packages_of_the_linux_distribution(monkeypatch):
     monkeypatch.setattr(host, "WINDOWS", False)
     for release, manager in (({"ID": "ubuntu", "ID_LIKE": "debian"}, "apt-get"), ({"ID": "fedora"}, "dnf"),
                              ({"ID": "rocky", "ID_LIKE": "rhel centos fedora"}, "dnf"), ({"ID": "arch"}, "pacman"),
-                             ({"ID": "manjaro", "ID_LIKE": "arch"}, "pacman"), ({"ID": "nixos"}, "OVMF")):
+                             ({"ID": "manjaro", "ID_LIKE": "arch"}, "pacman"),
+                             ({"ID": "opensuse-tumbleweed", "ID_LIKE": "opensuse suse"}, "zypper"), ({"ID": "nixos"}, "OVMF")):
         monkeypatch.setattr(host.platform, "freedesktop_os_release", lambda release=release: release)
         assert manager in host.qemu_install()
