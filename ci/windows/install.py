@@ -89,6 +89,17 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+def cpu_model() -> str:
+    """The host CPU's name: a KVM guest sees its features, and Setup's behaviour can differ by model."""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor()
+
+
 def qemu_binary() -> Path:
     found = shutil.which("qemu-system-x86_64") or r"C:\Program Files\qemu\qemu-system-x86_64.exe"
     if not Path(found).is_file():
@@ -418,7 +429,7 @@ def main() -> int:
     code, variables = firmware(qemu)
     work = args.work.resolve()
     (work / "shots").mkdir(parents=True, exist_ok=True)
-    log(f"host {platform.system()} {platform.machine()} {platform.processor()}, accelerator {accelerator}, cpu {cpu}")
+    log(f"host {platform.system()} {platform.machine()} {cpu_model()}, accelerator {accelerator}, cpu {cpu}")
     log(subprocess.run([str(qemu), "--version"], capture_output=True, text=True).stdout.splitlines()[0])
 
     iso = Path(args.iso_url)

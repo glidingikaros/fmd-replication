@@ -49,6 +49,7 @@ jobs:
           ln -s /mnt/fmd/replication replication
           echo "FMD_CACHE=/mnt/fmd/cache" >> "$GITHUB_ENV"
           df -h / /mnt
+          lscpu | grep -E 'Model name|Hypervisor'
       - name: Microsoft's ISO, saved in ~/Downloads as a browser saves it
         run: |
           url=$(jq -r .inputs.iso_url "$GITHUB_EVENT_PATH")
