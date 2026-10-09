@@ -1,0 +1,73 @@
+name: Base on Windows
+
+# The x64 base build on a Windows host (WHPX), in variants, to tell a slow install from a stuck one:
+# the base builder alone, a 5-hour install deadline, and the guest's disk writes logged every tick.
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: "A link to Windows11_Client_x64_en-us_26300_9457.iso (valid 24 hours; kept out of the logs)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  base:
+    name: ${{ matrix.variant }}
+    runs-on: windows-2025
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: as-is
+            options: ""
+          - variant: smp4
+            options: "--smp 4"
+          - variant: irqchip-off
+            options: "--accel-options ,kernel-irqchip=off"
+          - variant: smp4-irqchip-off
+            options: "--smp 4 --accel-options ,kernel-irqchip=off"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: QEMU
+        run: |
+          for attempt in 1 2 3; do
+            choco install qemu -y --no-progress > "$RUNNER_TEMP/choco-qemu.log" 2>&1 || true
+            [ -f "/c/Program Files/qemu/qemu-system-x86_64.exe" ] && break
+            sleep 30
+          done
+          echo 'C:\Program Files\qemu' >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.9.9"
+          python-version: "3.13.5"
+          enable-cache: false
+      - name: ISO
+        run: |
+          url=$(jq -r .inputs.iso_url "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$url"
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/win.iso" "$url"
+      - name: Base build (${{ matrix.variant }})
+        run: >-
+          uv run --no-project --with pycdlib==1.14.0 --with pywinrm==0.5.0 --with psutil==7.1.0 --with tzdata
+          python ci/windows/install.py --iso-url "$RUNNER_TEMP/win.iso"
+          --iso-sha256 bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650 --edition pro
+          --work "$RUNNER_TEMP/win-work" --deadline-min 300 ${{ matrix.options }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: base-windows-${{ matrix.variant }}
+          path: |
+            ${{ runner.temp }}/win-work/shots/
+            ${{ runner.temp }}/win-work/*.log
+            ${{ runner.temp }}/win-work/guest.json
+          retention-days: 7
+          if-no-files-found: warn

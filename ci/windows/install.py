@@ -272,8 +272,8 @@ def wait_ready(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: 
     written, writing_since = None, time.monotonic()
     while (facts := ready(winrm_port)) is None:
         serial_news(work)
+        now = disk_writes(monitor_port)  # None: no reading, so only the deadline applies
         if stall_seconds and not GUEST_SPOKE[0]:
-            now = disk_writes(monitor_port)  # None: no reading, so only the deadline applies
             if now is not None and now != written:
                 written, writing_since = now, time.monotonic()
             elif now is not None and time.monotonic() - writing_since > stall_seconds:
@@ -284,7 +284,8 @@ def wait_ready(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: 
         if time.monotonic() > deadline:
             raise SystemExit(f"no WinRM ({label})")
         monitor(monitor_port, f"screendump shots/{label}-{tick:03d}.png -f png")
-        log(f"{label} {tick}: qemu cpu {usage.cpu_percent():.0f}%")
+        log(f"{label} {tick}: qemu cpu {usage.cpu_percent():.0f}%"
+            + (f", guest wrote {now / 2**30:.2f} GiB" if now is not None else ""))
         tick += 1
         time.sleep(30)
     serial_news(work)
@@ -440,6 +441,9 @@ def main() -> int:
     parser.add_argument("--work", type=Path, default=Path("win-work"))
     parser.add_argument("--cpu", help="QEMU -cpu value; default: generation's (fmd.generation.qemu_host)")
     parser.add_argument("--deadline-min", type=int, default=75)  # Setup, OOBE and first logon
+    parser.add_argument("--smp", type=int, default=2, help="vCPUs for the install (the verify boot keeps 2)")
+    parser.add_argument("--accel-options", default="", help="appended to -accel <accelerator> for the install, "
+                        "e.g. ,kernel-irqchip=off")
     args = parser.parse_args()
 
     accelerator = ACCELERATORS[platform.system()]
@@ -473,8 +477,8 @@ def main() -> int:
                        check=True)
         rtc = datetime.now(GUEST_ZONE).strftime("%Y-%m-%dT%H:%M:%S")
         command = [
-            str(qemu), "-machine", f"q35,accel={accelerator}", "-cpu", cpu, "-smp", "2", "-m", "4096",
-            "-rtc", f"base={rtc}",
+            str(qemu), "-machine", "q35", "-accel", accelerator + args.accel_options, "-cpu", cpu,
+            "-smp", str(args.smp), "-m", "4096", "-rtc", f"base={rtc}",
             "-drive", "if=pflash,format=raw,readonly=on,file=code.fd",
             "-drive", "if=pflash,format=raw,file=vars.fd",
             "-drive", "id=disk,if=none,format=qcow2,file=win.qcow2,cache=unsafe",
