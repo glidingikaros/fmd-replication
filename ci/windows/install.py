@@ -26,6 +26,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -196,6 +197,17 @@ def disk_writes(port: int) -> int | None:
                 if field.startswith("wr_bytes="):
                     return int(field.removeprefix("wr_bytes="))
     return None
+
+
+def watch_console(monitor_port: int, label: str, seconds: int = 360, every: float = 3) -> None:
+    """Screenshots every few seconds while Windows Setup starts (shots/<label>-early-*.png): a stop
+    screen or an error that restarts the guest is on screen only briefly."""
+    def take() -> None:
+        for index in range(int(seconds / every)):
+            monitor(monitor_port, f"screendump shots/{label}-early-{index:03d}.png -f png")
+            time.sleep(every)
+
+    threading.Thread(target=take, daemon=True).start()
 
 
 class Stalled(Exception):
@@ -492,6 +504,7 @@ def main() -> int:
     # install is started again on a fresh disk instead of burning the deadline.
     for install_try in (1, 2):
         vm = start()
+        watch_console(monitor_port, f"install{install_try}")
         booted = time.monotonic()
         try:
             log(wait_ready(vm, work, winrm_port, monitor_port, booted + args.deadline_min * 60, f"install{install_try}",
