@@ -22,6 +22,7 @@ import hashlib
 import io
 import json
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -197,6 +198,24 @@ def disk_writes(port: int) -> int | None:
                 if field.startswith("wr_bytes="):
                     return int(field.removeprefix("wr_bytes="))
     return None
+
+
+CD_BOOT = re.compile(rb'starting Boot[0-9A-F]{4} "UEFI QEMU DVD-ROM')
+
+
+def boot_from_cd(monitor_port: int, serial: Path, wait: float = 120, presses: int = 8) -> bool:
+    """Answer "Press any key to boot from CD or DVD" once the firmware starts the CD, for a few seconds only:
+    later keys reach Windows Setup's own window, where a space opened its Support link and cancelled Setup."""
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline and not CD_BOOT.search(serial.read_bytes() if serial.exists() else b""):
+        time.sleep(0.2)
+    started = CD_BOOT.search(serial.read_bytes() if serial.exists() else b"") is not None
+    log("firmware started the CD: answering its key prompt" if started
+        else "no CD start in the serial log: pressing keys as before")
+    for _ in range(presses if started else 40):
+        monitor(monitor_port, "sendkey spc")
+        time.sleep(0.5)
+    return started
 
 
 def watch_console(monitor_port: int, label: str, seconds: int = 360, every: float = 3) -> None:
@@ -498,10 +517,7 @@ def main() -> int:
         SERIAL_SEEN[0], GUEST_SPOKE[0] = 0, False
         with (work / "qemu.log").open("w") as qemu_log:
             started = subprocess.Popen(command, cwd=work, stdout=qemu_log, stderr=subprocess.STDOUT)
-        time.sleep(2)
-        for _ in range(40):  # the Windows ISO waits for a key before booting from CD
-            monitor(monitor_port, "sendkey spc")
-            time.sleep(0.5)
+        boot_from_cd(monitor_port, work / "serial.log")
         return started
 
     # Windows Setup can hang under nested KVM (one attempt spun at 39% for 40 minutes): a stalled
