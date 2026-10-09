@@ -171,12 +171,19 @@ def monitor(port: int, command: str) -> None:
 
 
 def monitor_query(port: int, command: str) -> str:
+    """One monitor command's reply, read up to the prompt that follows it: QEMU echoes the command a
+    character at a time, and on a busy Windows host that alone outlasts any fixed wait."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
-            connection.recv(4096)
+            def read(done) -> bytes:
+                data, deadline = b"", time.monotonic() + 15
+                while not done(data) and time.monotonic() < deadline and (chunk := connection.recv(65536)):
+                    data += chunk
+                return data
+
+            read(lambda data: data.endswith(b"(qemu) "))  # the greeting
             connection.sendall(command.encode() + b"\n")
-            time.sleep(0.5)
-            return connection.recv(65536).decode(errors="replace")
+            return read(lambda data: b"\r\n" in data and data.endswith(b"(qemu) ")).decode(errors="replace")
     except OSError:
         return ""
 
@@ -254,10 +261,10 @@ def wait_ready(vm: subprocess.Popen, work: Path, winrm_port: int, monitor_port: 
     while (facts := ready(winrm_port)) is None:
         serial_news(work)
         if stall_seconds and not GUEST_SPOKE[0]:
-            now = disk_writes(monitor_port)
-            if now != written:
+            now = disk_writes(monitor_port)  # None: no reading, so only the deadline applies
+            if now is not None and now != written:
                 written, writing_since = now, time.monotonic()
-            elif time.monotonic() - writing_since > stall_seconds:
+            elif now is not None and time.monotonic() - writing_since > stall_seconds:
                 raise Stalled(f"no disk writes for {stall_seconds // 60} minutes at {written} bytes")
         if vm.poll() is not None:
             raise SystemExit("QEMU exited before WinRM answered:\n"
