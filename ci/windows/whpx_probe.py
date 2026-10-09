@@ -59,8 +59,8 @@ def trial(qemu: Path, accel: str, test: str, seconds: int) -> dict:
                    "-m", "1024", "-smp", "2", "-display", "none", "-nic", "none",
                    "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
                    "-drive", f"if=pflash,format=raw,file={work / 'vars.fd'}",
-                   "-drive", f"if=none,id=probe,driver=vvfat,dir={disk},fat-type=16",
-                   "-device", "ide-hd,drive=probe,bus=ide.0",
+                   "-drive", f"if=none,id=probe,driver=vvfat,dir={disk},fat-type=16,read-only=on",
+                   "-device", "virtio-blk-pci,drive=probe",
                    "-serial", f"file:{work / 'serial.log'}", "-monitor", f"tcp:127.0.0.1:{port},server,nowait"]
         started = time.monotonic()
         vm = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
