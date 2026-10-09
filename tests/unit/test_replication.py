@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -64,7 +65,7 @@ def test_the_cli_offers_doctor_setup_and_run(capsys):
         except SystemExit as exit:
             assert exit.code == 0
     out = capsys.readouterr().out
-    assert "I1" in out and "--iso" in out
+    assert "I1" in out and "--iso" in out and "--unpinned-iso" in out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="pip writes .exe launchers on Windows; fmd checks console scripts on POSIX only")
@@ -96,3 +97,60 @@ def test_generation_waits_until_its_biased_clock_is_past_the_base_builds_last_ev
                                    datetime(2026, 12, 8, 20, 10, tzinfo=timezone.utc)) == 6 * 60
     assert base_clock_wait_seconds("2026-10-08T18:00:00+00:00", 480,
                                    datetime(2026, 10, 8, 20, 30, tzinfo=timezone.utc)) == 0
+
+
+def test_setup_builds_the_base_only_from_the_pinned_iso_unless_told_otherwise(tmp_path, monkeypatch):
+    from fmd.replication import setup
+
+    monkeypatch.setattr(host, "base_guest_facts", lambda: None)
+    monkeypatch.setenv("FMD_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / "Downloads").mkdir()
+    (tmp_path / "Downloads" / "newer.iso").write_bytes(b"a newer build")
+    with pytest.raises(SystemExit, match="--unpinned-iso"):
+        setup.base(Path("~/Downloads/newer.iso"))  # PowerShell passes ~ through to fmd
+    with pytest.raises(SystemExit, match="no ISO at"):
+        setup.base(tmp_path / "missing.iso")
+
+    commands = []
+
+    def install(command, **kwargs):
+        commands.append([str(part) for part in command])
+        work = host.cache() / "base-build"
+        work.mkdir(parents=True)
+        for name in ("base.qcow2", "base-vars.fd"):
+            (work / name).write_bytes(b"")
+        (work / "guest.json").write_text(json.dumps({"build": "26300", "ubr": 9999}))
+
+    monkeypatch.setattr(setup, "run", install)
+    assert setup.base(Path("~/Downloads/newer.iso"), unpinned_iso=True) == {"build": "26300", "ubr": 9999}
+    command, = commands
+    assert command[command.index("--iso-url") + 1] == str((tmp_path / "Downloads" / "newer.iso").resolve())
+    assert command[command.index("--iso-sha256") + 1] == setup.file_sha256(tmp_path / "Downloads" / "newer.iso")
+
+
+def test_every_summary_row_names_the_windows_base_and_whether_its_iso_is_the_pinned_one(tmp_path, monkeypatch):
+    facts = {"build": "26300", "ubr": 9999, "iso_sha256": "ab" * 32}
+    monkeypatch.setattr(host, "provider", lambda: "qemu")
+    monkeypatch.setattr(host, "base_guest_facts", lambda: facts)
+    run.write_summary(tmp_path, [{"image": "I1", "admission": "passed"}])
+    row, = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert row == {"image": "I1", "admission": "passed",
+                   "windows_base": {"build": "26300.9999", "iso_sha256": "ab" * 32, "iso_pinned": False}}
+    facts["iso_sha256"] = host.PINS["windows_iso"]["sha256"]
+    assert host.windows_base()["iso_pinned"] is True
+    del facts["iso_sha256"]  # a base built before the ISO was recorded
+    assert host.windows_base()["iso_pinned"] is None
+    monkeypatch.setattr(host, "provider", lambda: "vmware_desktop")  # macOS runs the paper's own box
+    run.write_summary(tmp_path, [{"image": "I1", "admission": "passed"}])
+    assert json.loads((tmp_path / "summary.json").read_text(encoding="utf-8")) == [{"image": "I1", "admission": "passed"}]
+
+
+def test_doctor_names_the_qemu_packages_of_the_linux_distribution(monkeypatch):
+    monkeypatch.setattr(host, "WINDOWS", False)
+    for release, manager in (({"ID": "ubuntu", "ID_LIKE": "debian"}, "apt-get"), ({"ID": "fedora"}, "dnf"),
+                             ({"ID": "rocky", "ID_LIKE": "rhel centos fedora"}, "dnf"), ({"ID": "arch"}, "pacman"),
+                             ({"ID": "manjaro", "ID_LIKE": "arch"}, "pacman"), ({"ID": "nixos"}, "OVMF")):
+        monkeypatch.setattr(host.platform, "freedesktop_os_release", lambda release=release: release)
+        assert manager in host.qemu_install()

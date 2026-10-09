@@ -27,6 +27,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,14 +38,18 @@ import pycdlib
 import winrm
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path[:0] = [str(HERE.parent), str(HERE.parents[1] / "src")]
 from guest_console import diagnose, wsman_status  # noqa: E402
+
+# generation's own accelerator, CPU model and firmware (fmd.generation.qemu_host: standard library only)
+from fmd.generation.qemu_host import QEMU_ACCELERATORS as ACCELERATORS  # noqa: E402
+from fmd.generation.qemu_host import QEMU_CPU  # noqa: E402
+from fmd.generation.qemu_host import uefi_firmware as firmware  # noqa: E402
 
 PAPER_SCRIPTS = HERE.parents[1] / "tools" / "base-image" / "windows11-arm64" / "scripts"
 BASE_SCRIPTS = ("disable-sleep-hibernate.ps1", "set-network-private.ps1", "disable-update-reboots.ps1",
                 "disable-automatic-updates.ps1", "enable-autologon.ps1", "offline-base.ps1")
 CI_SCRIPTS = ("enable-winrm-ntlm.ps1", "first-logon.ps1")
-ACCELERATORS = {"Linux": "kvm", "Windows": "whpx", "Darwin": "hvf"}
 GUEST_ZONE = ZoneInfo("America/Los_Angeles")  # the base's TimeZone; Windows reads the RTC as local time
 READY = ("if (-not (Test-Path C:\\fmd\\first-logon-complete.txt)) { exit 3 };"
          "$o = Get-CimInstance Win32_OperatingSystem; $c = Get-Volume -DriveLetter C;"
@@ -95,38 +100,27 @@ def qemu_tool(qemu: Path, name: str) -> str:
     return str(qemu.with_name(qemu.name.replace("qemu-system-x86_64", name)))
 
 
-def firmware(qemu: Path) -> tuple[Path, Path]:
-    pairs = [(Path("/usr/share/OVMF/OVMF_CODE_4M.fd"), Path("/usr/share/OVMF/OVMF_VARS_4M.fd"))]
-    for share in (qemu.parent / "share", qemu.parent.parent / "share" / "qemu"):
-        pairs.append((share / "edk2-x86_64-code.fd", share / "edk2-i386-vars.fd"))
-    for code, variables in pairs:
-        if code.is_file() and variables.is_file():
-            return code, variables
-    raise SystemExit("no x86_64 UEFI firmware found next to QEMU or in /usr/share/OVMF")
-
-
-def iso_digest(path: Path, sha256: str | None) -> None:
-    """Hash an ISO already on disk (fmd replicate setup --iso) and check it against its pin."""
+def iso_digest(path: Path) -> str:
+    """The SHA-256 of an ISO already on disk (fmd replicate setup --iso)."""
     digest = hashlib.sha256()
     with path.open("rb") as source:
         while chunk := source.read(8 << 20):
             digest.update(chunk)
     log(f"iso: {path}, {path.stat().st_size} bytes, sha256 {digest.hexdigest()}")
-    if sha256 and digest.hexdigest() != sha256.lower():
-        raise SystemExit(f"the ISO's sha256 is not the pinned {sha256.lower()}")
+    return digest.hexdigest()
 
 
-def download(url: str, target: Path, sha256: str | None) -> None:
+def download(url: str, target: Path) -> str:
+    """Fetch the ISO; returns its SHA-256. The link's signed query stays out of the log."""
     started = time.monotonic()
     digest = hashlib.sha256()
     with urllib.request.urlopen(url, timeout=60) as response, target.open("wb") as out:
-        log(f"iso: {response.url}")
+        log(f"iso: from {urllib.parse.urlsplit(response.url).netloc}")
         while chunk := response.read(8 << 20):
             out.write(chunk)
             digest.update(chunk)
     log(f"iso: {target.stat().st_size} bytes, sha256 {digest.hexdigest()}, {time.monotonic() - started:.0f}s")
-    if sha256 and digest.hexdigest() != sha256.lower():
-        raise SystemExit(f"the ISO's sha256 is not the published {sha256.lower()}")
+    return digest.hexdigest()
 
 
 def answer_iso(target: Path, edition: str) -> None:
@@ -411,15 +405,15 @@ def verify(qemu: Path, accelerator: str, cpu: str, work: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iso-url", required=True, help="a link to the ISO, or the ISO file itself")
-    parser.add_argument("--iso-sha256", help="the ISO's published SHA-256, checked after the download")
+    parser.add_argument("--iso-sha256", help="the ISO's expected SHA-256, checked before the install")
     parser.add_argument("--edition", choices=("eval", "pro"), default="eval")
     parser.add_argument("--work", type=Path, default=Path("win-work"))
-    parser.add_argument("--cpu", help="QEMU -cpu value; default hides VT-x/AMD-V from the guest")
+    parser.add_argument("--cpu", help="QEMU -cpu value; default: generation's (fmd.generation.qemu_host)")
     parser.add_argument("--deadline-min", type=int, default=75)  # Setup, OOBE and first logon
     args = parser.parse_args()
 
     accelerator = ACCELERATORS[platform.system()]
-    cpu = args.cpu or ("max,-vmx,-svm" if accelerator == "whpx" else "host,-vmx,-svm")
+    cpu = args.cpu or QEMU_CPU[accelerator]
     qemu = qemu_binary()
     code, variables = firmware(qemu)
     work = args.work.resolve()
@@ -430,10 +424,12 @@ def main() -> int:
     iso = Path(args.iso_url)
     if iso.is_file():
         iso = iso.resolve()
-        iso_digest(iso, args.iso_sha256)
+        iso_sha256 = iso_digest(iso)
     else:
         iso = work / "win.iso"
-        download(args.iso_url, iso, args.iso_sha256)
+        iso_sha256 = download(args.iso_url, iso)
+    if args.iso_sha256 and iso_sha256 != args.iso_sha256.lower():
+        raise SystemExit(f"the ISO's sha256 is {iso_sha256}, not the expected {args.iso_sha256.lower()}")
     answer_iso(work / "answer.iso", args.edition)
     shutil.copyfile(code, work / "code.fd")
     shutil.copyfile(variables, work / "vars.fd")
@@ -518,7 +514,8 @@ def main() -> int:
     # The guest logged its last events on Pacific time; generation must boot its clock past them
     # (fmd.replication.run.await_base_clock).
     facts = json.loads((work / "guest.json").read_text())
-    facts.update(finished_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"), clock_zone=str(GUEST_ZONE))
+    facts.update(finished_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"), clock_zone=str(GUEST_ZONE),
+                 iso_sha256=iso_sha256)
     (work / "guest.json").write_text(json.dumps(facts, indent=2))
 
     if iso == work / "win.iso":  # downloaded here; a file the user gave stays

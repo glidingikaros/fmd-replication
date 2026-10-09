@@ -110,3 +110,22 @@ def test_the_windows_write_path_keeps_crlf_and_eof_bytes_and_the_neighbouring_se
     after = reader.read_at(0, 8192)
     assert after[1000:1000 + len(payload)] == payload
     assert after[:1000] == before[:1000] and after[1000 + len(payload):] == before[1000 + len(payload):]
+
+
+def test_the_uefi_firmware_is_the_first_pair_present_beside_qemu_or_in_a_distribution_folder(tmp_path, monkeypatch):
+    from fmd.generation import qemu_host
+
+    qemu = tmp_path / "bin" / "qemu-system-x86_64"
+    fedora = tmp_path / "usr" / "share" / "edk2" / "ovmf"
+    distribution = (fedora / "OVMF_CODE.fd", fedora / "OVMF_VARS.fd")
+    bundled = (tmp_path / "share" / "qemu" / "edk2-x86_64-code.fd", tmp_path / "share" / "qemu" / "edk2-i386-vars.fd")
+    monkeypatch.setattr(qemu_host, "QEMU_FIRMWARE", (("../share/qemu/edk2-x86_64-code.fd", "../share/qemu/edk2-i386-vars.fd"),
+                                                     (str(distribution[0]), str(distribution[1]))))
+    with pytest.raises(FileNotFoundError, match="OVMF"):
+        qemu_host.uefi_firmware(qemu)
+    for path in (*distribution, bundled[0]):  # QEMU's own build lacks its variable store: not a pair
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    assert qemu_host.uefi_firmware(qemu) == tuple(path.resolve() for path in distribution)
+    bundled[1].write_bytes(b"")
+    assert qemu_host.uefi_firmware(qemu) == tuple(path.resolve() for path in bundled)

@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Protocol
 
+from fmd.generation.qemu_host import QEMU_ACCELERATORS, QEMU_CPU, uefi_firmware
+
 VMRUN_CANDIDATES = (
     Path("/Applications/VMware Fusion.app/Contents/Library/vmrun"),
     Path("/Applications/VMware Fusion Tech Preview.app/Contents/Library/vmrun"),
@@ -196,16 +198,7 @@ class VmwareFusionBackend:
 
 
 QEMU_BASE_HOME_ENV = "FMD_QEMU_BASE_HOME"
-QEMU_ACCELERATORS = {"Linux": "kvm", "Windows": "whpx", "Darwin": "hvf"}
 QEMU_WINDOWS_DIR = Path(r"C:\Program Files\qemu")
-# Hide VT-x/AMD-V: Windows 11 24H2+ otherwise starts its own hypervisor, which hangs nested guests.
-# On KVM the Hyper-V clock and timer enlightenments keep guest time within the generator's
-# +-2 s clock checkpoints (VMware provides its own timekeeping; WHPX is Hyper-V already).
-QEMU_CPU = {"kvm": "host,-vmx,-svm,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time", "whpx": "max,-vmx,-svm",
-            "hvf": "host"}
-QEMU_FIRMWARE = (("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
-                 ("share/edk2-x86_64-code.fd", "share/edk2-i386-vars.fd"),
-                 ("../share/qemu/edk2-x86_64-code.fd", "../share/qemu/edk2-i386-vars.fd"))
 
 
 def _free_port() -> int:
@@ -392,13 +385,7 @@ class QemuBackend:
         self.pipeline.preflight_generation_storage(base)
         return {"base_path": str(base)}
 
-    @staticmethod
-    def _firmware(qemu: Path) -> tuple[Path, Path]:
-        for code, variables in QEMU_FIRMWARE:
-            code_path, vars_path = (qemu.parent / code).resolve(), (qemu.parent / variables).resolve()
-            if code_path.is_file() and vars_path.is_file():
-                return code_path, vars_path
-        raise FileNotFoundError("no x86_64 UEFI firmware next to QEMU or in /usr/share/OVMF")
+    _firmware = staticmethod(uefi_firmware)
 
     def _monitor(self, command: str) -> str:
         """Run one monitor command; returns what the monitor printed back."""

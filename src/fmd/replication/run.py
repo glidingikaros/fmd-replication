@@ -132,15 +132,26 @@ def summary(image: str, gate: Path) -> dict:
             "not_exact": sorted(name for name, q in rules["per_question"].items() if not q["exact"])}
 
 
+def write_summary(output: Path, results: list[dict]) -> None:
+    """summary.json; on QEMU hosts each row names the Windows base it ran on (build, ISO, whether pinned)."""
+    base = host.windows_base()
+    rows = [row | {"windows_base": base} for row in results] if base else results
+    (output / "summary.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+
 def images(names: list[str], output: Path, attempts: int) -> int:
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    base = host.windows_base()
+    if base and base["iso_pinned"] is False:
+        log(f"the Windows base is build {base['build']} from an ISO that is not the pinned one "
+            f"(SHA-256 {base['iso_sha256']}); summary.json records it with every image")
     results = []
     try:
         lock = dependency_lock(output)
     except SystemExit as error:
         results = [{"image": image, "admission": "not reached", "error": str(error)} for image in names]
-        (output / "summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+        write_summary(output, results)
         raise
     for image in names:
         folder = output / image
@@ -149,7 +160,7 @@ def images(names: list[str], output: Path, attempts: int) -> int:
             results.append(analyse(image, generate(image, lock, folder, attempts), folder))
         except SystemExit as error:
             results.append({"image": image, "admission": "not reached", "error": str(error)})
-        (output / "summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+        write_summary(output, results)
     for row in results:
         log(f"{row['image']}: admission {row['admission']}"
             + (f", {row['exact']}/{row['questions']} exact, F1 {row['f1']}" if "exact" in row else f" ({row.get('error', '')})"))

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -61,13 +62,18 @@ def ansible() -> None:
         return  # the paper's VMware path uses the host's Ansible (brew install ansible)
     if host.WINDOWS:
         distro, venv = host.PINS["wsl_distribution"], "/mnt/c/fmd-ansible"
+        # a new Ubuntu has no venv module (python3-venv); root needs no password inside WSL
+        run(["wsl.exe", "-d", distro, "-u", "root", "--exec", "bash", "-c",
+             "dpkg -s python3-venv > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3-venv)"])
         run(["wsl.exe", "-d", distro, "--exec", "bash", "-c",
              f"test -x {venv}/bin/ansible || python3 -m venv {venv} && "
              f"{venv}/bin/pip install -q ansible-core=={pins['ansible-core']} pywinrm=={pins['pywinrm']} && "
              f"{venv}/bin/ansible-galaxy collection install ansible.windows:=={pins['ansible.windows']} -p {venv}/collections"])
-        run(["uv", "tool", "install", "--force", host.REPO / "ci" / "wsl-ansible"])
+        run(["uv", "tool", "install", "--force", "--python", platform.python_version(), host.REPO / "ci" / "wsl-ansible"])
         return
-    run(["uv", "tool", "install", "--force", f"ansible-core=={pins['ansible-core']}", "--with", f"pywinrm=={pins['pywinrm']}"])
+    # fmd's own Python version: ansible-core needs a newer one than some distributions default to
+    run(["uv", "tool", "install", "--force", "--python", platform.python_version(), f"ansible-core=={pins['ansible-core']}",
+         "--with", f"pywinrm=={pins['pywinrm']}"])
     run([host.which("ansible-galaxy"), "collection", "install", f"ansible.windows:=={pins['ansible.windows']}"])
 
 
@@ -108,7 +114,15 @@ def windows_parsers() -> Path:
     return host.cache() / "windows-parsers"
 
 
-def base(iso: Path | None = None) -> dict:
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(8 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def base(iso: Path | None = None, *, unpinned_iso: bool = False) -> dict:
     """Install the Windows base from Microsoft's Windows 11 ISO (ci/windows/install.py, as CI builds it)
     and place it where the QEMU provider looks for it. About 50 minutes, once per host."""
     from fmd.generation.recipe import qemu_box
@@ -120,11 +134,21 @@ def base(iso: Path | None = None) -> dict:
     if iso is None:
         raise SystemExit(f"the Windows base is built from Microsoft's ISO: download {pin['choose']} from "
                          f"{pin['download']} ({pin['file']}), then run: fmd replicate setup --iso <that file>")
+    iso = Path(iso).expanduser().resolve()  # PowerShell passes ~ through unexpanded
+    if not iso.is_file():
+        raise SystemExit(f"no ISO at {iso}")
+    log(f"checking {iso.name} against the pinned SHA-256")
+    sha256 = file_sha256(iso)
+    if sha256 != pin["sha256"] and not unpinned_iso:
+        raise SystemExit(f"{iso.name} is not the pinned ISO ({pin['file']}): its SHA-256 is {sha256}, the pin is "
+                         f"{pin['sha256']}. Microsoft offers only its current build. To build the base from this ISO "
+                         "anyway, add --unpinned-iso: every result then records the base's build and this SHA-256.")
     work = host.cache() / "base-build"
     pins = host.PINS["base_builder"]
-    run(["uv", "run", "--no-project", "--with", f"pycdlib=={pins['pycdlib']}", "--with", f"pywinrm=={pins['pywinrm']}",
-         "--with", f"psutil=={pins['psutil']}", "--with", "tzdata", "python", host.REPO / "ci" / "windows" / "install.py",
-         "--iso-url", Path(iso).resolve(), "--iso-sha256", pin["sha256"], "--edition", pin["edition"], "--work", work])
+    run(["uv", "run", "--no-project", "--python", platform.python_version(), "--with", f"pycdlib=={pins['pycdlib']}",
+         "--with", f"pywinrm=={pins['pywinrm']}", "--with", f"psutil=={pins['psutil']}", "--with", "tzdata",
+         "python", host.REPO / "ci" / "windows" / "install.py",
+         "--iso-url", iso, "--iso-sha256", sha256, "--edition", pin["edition"], "--work", work])
     box = host.base_home() / qemu_box().replace("/", "-VAGRANTSLASH-") / "0"
     target = box / "amd64" / "qemu"
     target.mkdir(parents=True, exist_ok=True)
@@ -135,9 +159,9 @@ def base(iso: Path | None = None) -> dict:
     return json.loads((box / "guest.json").read_text(encoding="utf-8"))
 
 
-def all_steps(*, build_base: bool = True, iso: Path | None = None) -> None:
+def all_steps(*, build_base: bool = True, iso: Path | None = None, unpinned_iso: bool = False) -> None:
     dotnet_runtime()
     ansible()
     toolchain()
     if build_base and host.provider() == "qemu":
-        log(f"base guest: {base(iso)}")
+        log(f"base guest: {base(iso, unpinned_iso=unpinned_iso)}")

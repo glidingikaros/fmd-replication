@@ -16,6 +16,13 @@ PINS = json.loads((Path(__file__).with_name("pins.json")).read_text(encoding="ut
 QEMU_WINDOWS_DIR = Path(r"C:\Program Files\qemu")
 WINDOWS = sys.platform == "win32"
 MACOS = sys.platform == "darwin"
+LINUX_QEMU = {  # /etc/os-release ID or ID_LIKE: the packages REPLICATE.md names (QEMU, its tools, OVMF)
+    "debian": "sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf",
+    "fedora": "sudo dnf install qemu-system-x86-core qemu-img edk2-ovmf",
+    "arch": "sudo pacman -S qemu-system-x86 qemu-img edk2-ovmf",
+}
+LONG_PATHS = ("admin PowerShell: New-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem "
+              "-Name LongPathsEnabled -Value 1 -PropertyType DWord -Force")
 
 
 def cache() -> Path:
@@ -36,6 +43,17 @@ def base_guest_facts() -> dict | None:
 
     path = base_home() / qemu_box().replace("/", "-VAGRANTSLASH-") / "0" / "guest.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def windows_base() -> dict | None:
+    """The QEMU base's Windows build and the ISO it was installed from, as every result records them.
+    iso_pinned is None for a base built before the ISO's SHA-256 was recorded."""
+    facts = base_guest_facts() if provider() == "qemu" else None
+    if facts is None:
+        return None
+    sha256 = facts.get("iso_sha256")
+    return {"build": f"{facts['build']}.{facts['ubr']}", "iso_sha256": sha256,
+            "iso_pinned": None if sha256 is None else sha256 == PINS["windows_iso"]["sha256"]}
 
 
 def dotnet_home() -> Path:
@@ -92,6 +110,31 @@ def accelerates(qemu: str, accelerator: str) -> bool:
         return True
 
 
+def qemu_install() -> str:
+    """The command that installs QEMU, its tools and its UEFI firmware on this host."""
+    if WINDOWS:
+        return "winget install SoftwareFreedomConservancy.QEMU"
+    try:
+        release = platform.freedesktop_os_release()
+    except OSError:
+        release = {}
+    for name in (release.get("ID", ""), *release.get("ID_LIKE", "").split()):
+        if name in LINUX_QEMU:
+            return LINUX_QEMU[name]
+    return "install QEMU (qemu-system-x86_64, qemu-img, qemu-io) and its x86-64 UEFI firmware (OVMF)"
+
+
+def long_paths() -> bool:
+    """Collection writes paths over 260 characters, which Windows refuses unless long paths are on."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
+
+
 def check(rows: list, name: str, found, fix: str) -> None:
     rows.append((name, bool(found), str(found) if found and found is not True else ("found" if found else fix)))
 
@@ -118,10 +161,15 @@ def checks() -> list[tuple[str, bool, str]]:
         check(rows, "the paper's Windows box (fmd/windows-11-arm64)", box.is_dir() and box,
               "build it: tools/base-image/windows11-arm64/build-vmware-box.sh (or set VAGRANT_HOME to where it is)")
         return rows
+    from fmd.generation.qemu_host import uefi_firmware
+
     qemu = which("qemu-system-x86_64")
-    check(rows, "QEMU", qemu and which("qemu-img") and which("qemu-io") and qemu,
-          "sudo apt-get install qemu-system-x86 qemu-utils ovmf" if system == "Linux"
-          else "winget install SoftwareFreedomConservancy.QEMU")
+    check(rows, "QEMU", qemu and which("qemu-img") and which("qemu-io") and qemu, qemu_install())
+    try:
+        firmware = uefi_firmware(Path(qemu))[0] if qemu else None
+    except FileNotFoundError:
+        firmware = None
+    check(rows, "UEFI firmware for QEMU (OVMF)", firmware, qemu_install())
     if system == "Linux":
         check(rows, "KVM (/dev/kvm read-write)", os.access("/dev/kvm", os.R_OK | os.W_OK),
               "sudo usermod -aG kvm $USER, then log in again")
@@ -132,9 +180,12 @@ def checks() -> list[tuple[str, bool, str]]:
         distro = PINS["wsl_distribution"]
         check(rows, f"WSL distribution {distro}", distro in listed.decode("utf-16-le", "replace"),
               f"wsl --install -d {distro} --no-launch; wsl --set-version {distro} 1")
+        check(rows, "long paths (collection writes paths over 260 characters)", long_paths(), LONG_PATHS)
     check(rows, "Ansible with WinRM", which("ansible-playbook"), "run: fmd replicate setup")
-    facts = base_guest_facts()
+    base = windows_base()
+    built = base and f"build {base['build']}, " + {True: "from the pinned ISO", None: "ISO not recorded",
+                                                    False: f"from an unpinned ISO (SHA-256 {base['iso_sha256']})"}[base["iso_pinned"]]
     iso = PINS["windows_iso"]
-    check(rows, "Windows base image", facts and f"build {facts['build']}",
+    check(rows, "Windows base image", built,
           f"download {iso['file']} from {iso['download']}, then run: fmd replicate setup --iso <that file> (~50 min)")
     return rows

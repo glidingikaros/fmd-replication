@@ -25,26 +25,32 @@ On every host:
 On Linux and Windows, also Microsoft's Windows 11 ISO, which you download yourself (its links last a
 day): on [microsoft.com/software-download/windows11](https://www.microsoft.com/software-download/windows11)
 choose *Windows 11 (multi-edition ISO for x64 devices)*, then *English (United States)*. The file is
-`Windows11_Client_x64_en-us_26300_9457.iso`; setup checks its SHA-256.
+`Windows11_Client_x64_en-us_26300_9457.iso`; setup checks its SHA-256. Microsoft offers only its current
+build, so a later download can be a newer one. Setup then stops; `--unpinned-iso` builds the base from it
+anyway, and every result records that build and the ISO's SHA-256.
 
 Then, depending on the host:
 
 **Linux**
 
 ```bash
-sudo apt-get install qemu-system-x86 qemu-utils ovmf
+sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf
 ```
 
+On Fedora, `sudo dnf install qemu-system-x86-core qemu-img edk2-ovmf`; on Arch, `sudo pacman -S qemu-system-x86 qemu-img edk2-ovmf`.
 Your user needs read-write access to `/dev/kvm`. If it doesn't have it, run `sudo usermod -aG kvm $USER` and log in again.
 
 **Windows** (an administrator PowerShell, then one reboot)
 
 ```powershell
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+New-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 winget install SoftwareFreedomConservancy.QEMU
 wsl --install -d Ubuntu-24.04 --no-launch
 wsl --set-version Ubuntu-24.04 1
 ```
+
+The second line lifts Windows' 260-character path limit: collection writes longer paths.
 
 **macOS**
 
@@ -84,5 +90,6 @@ uv run fmd replicate run I1 I2 I3
   - sleep, updates and automatic restarts off;
   - outbound traffic blocked and event logs uncompressed, by the paper's `offline-base.ps1`.
 
-  The Enterprise Evaluation is not used. Its online activation does not survive the virtual hardware that generation boots it on, and an unactivated evaluation shuts down every hour. Microsoft offers only its current build, so once it replaces 26300.9457 the pinned SHA-256 stops matching. `guest.json` records the build, and the dependency lock pins it for every run on that host.
+  The Enterprise Evaluation is not used. Its online activation does not survive the virtual hardware that generation boots it on, and an unactivated evaluation shuts down every hour. Microsoft offers only its current build, so once it replaces 26300.9457 the pinned SHA-256 stops matching and setup asks for `--unpinned-iso`. `guest.json` records the build and the ISO's SHA-256, the dependency lock pins the build for every run on that host, and each row of `summary.json` names the base (`windows_base`: build, ISO SHA-256, whether it is the pinned ISO).
+- **Python.** `.python-version` pins CPython 3.13.5, which every run so far used; uv downloads it when the host lacks it.
 - **Images are never bit-identical.** Neither are the paper's: each frozen recipe draws a fresh random assignment, and Windows installs vary. What replicates is the protocol and the result: 9/9 exact under strict admission.
