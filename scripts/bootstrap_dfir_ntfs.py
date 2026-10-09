@@ -73,11 +73,23 @@ def install_command(uv: str, lock: dict[str, Any], env_root: Path) -> list[str]:
         uv,
         "pip",
         "install",
+        "--no-cache",  # never reuse a checkout made under other line-ending settings
         "--python",
         str(runtime.environment_python(env_root)),
         "--no-deps",
         install_requirement(lock),
     ]
+
+
+def install_environment(environ: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """git checks dfir_ntfs out as it does on Linux. Git for Windows defaults to core.autocrlf=true,
+    and sources checked out with CRLF line endings no longer match the lock's package tree hash."""
+    env = dict(environ)
+    count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    for offset, (key, value) in enumerate((("core.autocrlf", "false"), ("core.eol", "lf"))):
+        env[f"GIT_CONFIG_KEY_{count + offset}"], env[f"GIT_CONFIG_VALUE_{count + offset}"] = key, value
+    env["GIT_CONFIG_COUNT"] = str(count + 2)
+    return env
 
 
 def driver_install_command(python: str, env_root: Path) -> list[str]:
@@ -190,7 +202,7 @@ def rebuild(
         report["dry_run"] = True
         return report
     run_step(run, commands[0], timeout=VENV_TIMEOUT_SECONDS)
-    run_step(run, commands[1], timeout=INSTALL_TIMEOUT_SECONDS)
+    run_step(run, commands[1], timeout=INSTALL_TIMEOUT_SECONDS, env=install_environment(environ))
     installed = run_step(run, commands[2], timeout=DRIVER_TIMEOUT_SECONDS, env=driver_install_environment(environ))
     report["driver_install_output"] = (installed.stdout or "").strip()
     verification = verify(env_root, lock_path)

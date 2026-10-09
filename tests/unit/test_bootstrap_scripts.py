@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -82,9 +83,29 @@ def test_dfir_plan_pins_commit_and_python(tmp_path):
             'commit_id': 'a' * 40, 'python_version': '3.13.5'}
     assert dfir.install_requirement(lock).endswith('@' + 'a' * 40)
     assert dfir.venv_command('uv', lock, tmp_path)[-3:] == ['--python', '3.13.5', str(tmp_path)]
-    assert '--no-deps' in dfir.install_command('uv', lock, tmp_path)
+    assert {'--no-deps', '--no-cache'} <= set(dfir.install_command('uv', lock, tmp_path))
     with pytest.raises(dfir.BootstrapError):
         dfir.install_requirement({**lock, 'commit_id': 'main'})
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='git is not installed')
+def test_dfir_ntfs_is_checked_out_with_its_committed_line_endings_under_git_for_windows_defaults(tmp_path):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'LogFile.py').write_bytes(b'line one\nline two\n')
+    plain = {**os.environ, 'HOME': str(tmp_path), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_COUNT': '0'}
+
+    def git(*args, env=plain, cwd=source):
+        subprocess.run(['git', *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+    git('init', '-q')
+    git('add', '.')
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.org', 'commit', '-qm', 'lf')
+    windows = {**plain, 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.autocrlf', 'GIT_CONFIG_VALUE_0': 'true'}
+    git('clone', '-q', str(source), str(tmp_path / 'default'), env=windows, cwd=tmp_path)
+    git('clone', '-q', str(source), str(tmp_path / 'locked'), env=dfir.install_environment(windows), cwd=tmp_path)
+    assert (tmp_path / 'default' / 'LogFile.py').read_bytes() == b'line one\r\nline two\r\n'
+    assert (tmp_path / 'locked' / 'LogFile.py').read_bytes() == b'line one\nline two\n'
 
 
 def test_custom_lock_rebuild_refuses_before_mutation(tmp_path):
